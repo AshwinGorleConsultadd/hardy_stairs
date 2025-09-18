@@ -622,56 +622,8 @@ class VideoProcessor:
         return chunks
     
 
-    def extract_defects_using_llm(self, refined_chunks: List[RefinedTranscriptChunk]) -> List[DefectInfo]:
-        """
-        Extract defects from refined transcript chunks using LLM
-        
-        Args:
-            refined_chunks: List of refined transcript chunks
-            
-        Returns:
-            List of DefectInfo objects
-        """
-        if self.llm:
-            logger.warning("LLM not initialized, using rule-based defect extraction")
-            return self._extract_defects_rule_based_from_chunks(refined_chunks)
-        
-        try:
-            # Step 1: Filter relevant chunks
-            relevant_chunks = self._filter_relevant_chunks(refined_chunks)
-            logger.info("Filtered %d relevant chunks from %d total chunks", len(relevant_chunks), len(refined_chunks))
-            
-            # Save relevant chunks for debugging
-            relevant_chunks_file = os.path.join("output", "relevant_chunks.json")
-            with open(relevant_chunks_file, 'w', encoding='utf-8') as f:
-                json.dump([chunk.model_dump() for chunk in relevant_chunks], f, indent=2)
-            logger.info("Saved %d relevant chunks to relevant_chunks.json", len(relevant_chunks))
-            
-            # Step 2: Extract context (buildings/apartments) from all chunks
-            self._extract_context_from_chunks(refined_chunks)
-            
-            # Step 3: Process chunks in batches
-            all_defects = []
-            batch_size = 15
-            
-            for i in range(0, len(relevant_chunks), batch_size):
-                batch = relevant_chunks[i:i + batch_size]
-                batch_defects = self._process_defect_batch(batch, i // batch_size + 1)
-                all_defects.extend(batch_defects)
-                
-                logger.info("Processed defect batch %d/%d: %d chunks -> %d defects", 
-                           i // batch_size + 1, 
-                           (len(relevant_chunks) + batch_size - 1) // batch_size,
-                           len(batch), len(batch_defects))
-            
-            logger.info("Extracted %d total defects from %d relevant chunks", len(all_defects), len(relevant_chunks))
-            return all_defects
-            
-        except Exception as e:
-            logger.error("Defect extraction failed: %s", e)
-            return []
     
-    def _extract_defects_rule_based_from_chunks(self, refined_chunks: List[RefinedTranscriptChunk]) -> List[DefectInfo]:
+    def extract_defects_using_regs(self, refined_chunks: List[RefinedTranscriptChunk]) -> List[DefectInfo]:
         """Rule-based defect extraction from refined chunks (fallback when LLM not available)"""
         defects = []
         
@@ -884,7 +836,7 @@ class VideoProcessor:
                     self.current_apartment_number = apartment_match
                     logger.info("Apartment detected: %s", apartment_match)
     
-    def _process_defect_batch(self, batch_chunks: List[RefinedTranscriptChunk], batch_number: int) -> List[DefectInfo]:
+   
         """Process a batch of chunks to extract defects"""
         try:
             # Format batch chunks for LLM
@@ -913,7 +865,7 @@ class VideoProcessor:
             return defects
             
         except Exception as e:
-            logger.error("Failed to process defect batch %d: %s", batch_number, e)
+            logger.error("Failed to process defect batch: %s", e)
             return []
     
     def _parse_defect_response(self, response: str) -> List[DefectInfo]:
@@ -1132,7 +1084,7 @@ class VideoProcessor:
         
         # Step 2: Extract audio
         audio_path = os.path.join(output_dir, "extracted_audio.wav")
-        self.extract_audio_from_video(video_path, audio_path)
+        #self.extract_audio_from_video(video_path, audio_path)
         
         # Step 3: Transcribe audio
         transcript_result = self.transcribe_audio(audio_path)
@@ -1201,7 +1153,7 @@ class VideoProcessor:
         refined_chunks_for_extraction = self._convert_dict_to_chunks(llms_refined_transcript_cunks)
         
         # Step 5: Extract defects using refined chunks
-        defects = self.extract_defects_using_llm(refined_chunks_for_extraction)
+        defects = self.extract_defects_using_regs(refined_chunks_for_extraction)
 
         
         # Save defects for debugging
@@ -1309,7 +1261,7 @@ def process_video_and_generate_report(
         
         # Initialize video processor
         processor = VideoProcessor(
-            whisper_model_name="small.en",
+            whisper_model_name="base.en",
             openai_api_key=openai_api_key
         )
         
