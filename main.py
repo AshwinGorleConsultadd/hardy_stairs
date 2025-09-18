@@ -35,13 +35,7 @@ except ImportError:
         PydanticOutputParser = None
 from pydantic import BaseModel, Field
 
-# AWS imports (optional)
-try:
-    import boto3
-    from botocore.exceptions import ClientError
-except ImportError:
-    boto3 = None
-    ClientError = Exception
+# AWS imports removed - using HTTP download for S3 instead
 
 
 # Configure logging
@@ -105,14 +99,8 @@ class VideoProcessor:
         else:
             self.llm = None
         
-        # Initialize S3 client
-        if boto3:
-            try:
-                self.s3_client = boto3.client('s3')
-            except Exception as e:
-                logger.warning("Could not initialize S3 client: %s", e)
-        else:
-            logger.warning("boto3 not available - S3 functionality disabled")
+        # S3 client not needed - we'll use HTTP download for public URLs
+        self.s3_client = None
     
     def load_whisper_model(self):
         """Load the Whisper model for transcription"""
@@ -140,28 +128,36 @@ class VideoProcessor:
         logger.info("Loading video from local path: %s", video_path)
         return video_path
     
-    def get_video_from_s3(self, bucket_name: str, object_key: str, local_path: str) -> str:
+    def get_video_from_s3(self, s3_url: str, local_path: str) -> str:
         """
-        Download video from S3 bucket
+        Download video from S3 using public URL
         
         Args:
-            bucket_name: S3 bucket name
-            object_key: S3 object key
+            s3_url: Public S3 URL (e.g., https://bucket.s3.amazonaws.com/path/video.mp4)
             local_path: Local path to save the video
             
         Returns:
             Path to the downloaded video file
         """
-        if not self.s3_client:
-            raise RuntimeError("S3 client not initialized")
-        
         try:
-            logger.info("Downloading video from S3: s3://%s/%s", bucket_name, object_key)
-            self.s3_client.download_file(bucket_name, object_key, local_path)
+            import requests
+            
+            logger.info("Downloading video from S3 URL: %s", s3_url)
+            
+            # Download the file
+            response = requests.get(s3_url, stream=True)
+            response.raise_for_status()
+            
+            # Save to local file
+            with open(local_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
             logger.info("Video downloaded to: %s", local_path)
             return local_path
-        except ClientError as e:
-            logger.error("Failed to download video from S3: %s", e)
+            
+        except Exception as e:
+            logger.error("Failed to download video from S3 URL: %s", e)
             raise
     
     def extract_audio_from_video(self, video_path: str, output_audio_path: str) -> str:
@@ -1075,8 +1071,7 @@ class VideoProcessor:
         elif video_source["type"] == "s3":
             local_video_path = os.path.join(output_dir, "downloaded_video.mp4")
             video_path = self.get_video_from_s3(
-                video_source["bucket"], 
-                video_source["path"], 
+                video_source["path"],  # Now expects S3 URL directly
                 local_video_path
             )
         else:
@@ -1268,8 +1263,7 @@ def process_video_and_generate_report(
         # Process video and get defects
         video_source = {
             "type": video_source_type,
-            "path": video_url,
-            "bucket": None  # Not needed for local files
+            "path": video_url  # For S3, this should be the public URL
         }
         defects = processor.process_video(video_source)
         
