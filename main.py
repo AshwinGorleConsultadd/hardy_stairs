@@ -1079,7 +1079,7 @@ class VideoProcessor:
         
         # Step 2: Extract audio
         audio_path = os.path.join(output_dir, "extracted_audio.wav")
-        #self.extract_audio_from_video(video_path, audio_path)
+        self.extract_audio_from_video(video_path, audio_path)
         
         # Step 3: Transcribe audio
         transcript_result = self.transcribe_audio(audio_path)
@@ -1256,7 +1256,7 @@ def process_video_and_generate_report(
         
         # Initialize video processor
         processor = VideoProcessor(
-            whisper_model_name="base.en",
+            whisper_model_name="small.en",
             openai_api_key=openai_api_key
         )
         
