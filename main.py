@@ -43,14 +43,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-class RefinedTranscriptChunk(BaseModel):
-    """Pydantic model for refined transcript chunks"""
-    description: str = Field(description="What is being talked about in this transcript chunk")
-    start_time: float = Field(description="Start timestamp in seconds")
-    end_time: float = Field(description="End timestamp in seconds")
-   
-
-
 class DefectInfo(BaseModel):
     """Pydantic model for structured defect information"""
     building_counter: Optional[str] = Field(None, description="Building counter (building1, building2, etc.)")
@@ -523,7 +515,10 @@ class VideoProcessor:
             logger.error("Failed to save transcript text file: %s", e)
             raise
     
-    def create_formated_transcript_chunks(self, transcript_result: Dict[str, Any]) -> List[RefinedTranscriptChunk]:
+
+
+
+    def create_formated_transcript_chunks(self, transcript_result: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Create refined transcript chunks using simple chunking
         
@@ -531,75 +526,8 @@ class VideoProcessor:
             transcript_result: Whisper transcription result
             
         Returns:
-            List of RefinedTranscriptChunk objects
+            List of plain dictionaries
         """
-        logger.info("Using simple chunking for transcript refinement")
-        return self._create_simple_chunks(transcript_result)
-
-    def _convert_chunks_to_dict_format(self, chunks: List[RefinedTranscriptChunk]) -> List[Dict[str, Any]]:
-        """
-        Convert RefinedTranscriptChunk objects to dictionary format
-        
-        Args:
-            chunks: List of RefinedTranscriptChunk objects
-            
-        Returns:
-            List of dictionaries with description, start_time, and end_time
-        """
-        defects_data = []
-        for chunk in chunks:
-            defects_data.append({
-                "description": chunk.description,
-                "start_time": chunk.start_time,
-                "end_time": chunk.end_time
-            })
-        
-        logger.info("Converted %d chunks to dictionary format", len(defects_data))
-        return defects_data
-
-    def _convert_dict_to_chunks(self, dict_list: List[Dict[str, Any]]) -> List[RefinedTranscriptChunk]:
-        """
-        Convert list of dictionaries back to RefinedTranscriptChunk objects
-        
-        Args:
-            dict_list: List of dictionaries with description, start_time, and end_time
-            
-        Returns:
-            List of RefinedTranscriptChunk objects
-        """
-        # Handle None input gracefully
-        if dict_list is None:
-            logger.error("❌ Received None input for dict_list conversion")
-            return []
-        
-        # Handle non-list input
-        if not isinstance(dict_list, list):
-            logger.error("❌ Expected list but got %s for dict_list conversion", type(dict_list))
-            return []
-        
-        chunks = []
-        for i, item in enumerate(dict_list):
-            try:
-                # Validate item structure
-                if not isinstance(item, dict):
-                    logger.warning("⚠️ Skipping non-dict item at index %d: %s", i, type(item))
-                    continue
-                
-                chunk = RefinedTranscriptChunk(
-                    description=item.get('description', ''),
-                    start_time=item.get('start_time', 0),
-                    end_time=item.get('end_time', 0)
-                )
-                chunks.append(chunk)
-            except Exception as e:
-                logger.error("❌ Error converting item %d to RefinedTranscriptChunk: %s", i, e)
-                continue
-        
-        logger.info("Converted %d dictionaries back to RefinedTranscriptChunk objects", len(chunks))
-        return chunks
-
-    def _create_simple_chunks(self, transcript_result: Dict[str, Any]) -> List[RefinedTranscriptChunk]:
-        """Fallback simple chunking when LLM is not available"""
         chunks = []
         
         for segment in transcript_result.get('segments', []):
@@ -608,18 +536,20 @@ class VideoProcessor:
             text = segment.get('text', '').strip()
             
             if text:
-                chunks.append(RefinedTranscriptChunk(
-                    description=text,
-                    start_time=start_time,
-                    end_time=end_time
-                ))
+                chunks.append({
+                    "description": text,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "building_number": None,
+                    "apartment_number": None
+                })
         
         logger.info("Created %d simple transcript chunks", len(chunks))
         return chunks
     
 
-    
-    def extract_defects_using_regs(self, refined_chunks: List[RefinedTranscriptChunk]) -> List[DefectInfo]:
+    #-------------------------------------------------------------------------------
+    def extract_defects_using_regs(self, refined_chunks: List[Dict[str, Any]]) -> List[DefectInfo]:
         """Rule-based defect extraction from refined chunks (fallback when LLM not available)"""
         defects = []
         
@@ -631,7 +561,7 @@ class VideoProcessor:
         logger.info("Using rule-based extraction on %d relevant chunks", len(relevant_chunks))
         
         for chunk in relevant_chunks:
-            description = chunk.description.lower()
+            description = chunk["description"].lower()
             
             # Look for defect patterns
             if any(keyword in description for keyword in ['tread', 'track', 'try', 'tri', 'tred', 'thread']):
@@ -646,9 +576,9 @@ class VideoProcessor:
         logger.info("Extracted %d defects using rule-based method", len(defects))
         return defects
     
-    def _extract_defect_from_chunk(self, chunk: RefinedTranscriptChunk) -> Optional[DefectInfo]:
+    def _extract_defect_from_chunk(self, chunk: Dict[str, Any]) -> Optional[DefectInfo]:
         """Extract defect information from a single refined chunk with improved accuracy"""
-        description = chunk.description.lower()
+        description = chunk["description"].lower()
         
         # Word to number mapping for tread numbers and priorities (up to 25)
         word_to_num = {
@@ -777,17 +707,18 @@ class VideoProcessor:
                 tread_number=tread_number,
                 priority=priority,
                 description=defect_description,
-                timestamp_start=chunk.start_time,
-                timestamp_end=chunk.end_time,
-                transcript_segment=chunk.description
+                timestamp_start=chunk["start_time"],
+                timestamp_end=chunk["end_time"],
+                transcript_segment=chunk["description"]
             )
             # Calculate screenshot timestamp
-            defect_info.ss_timestamp = self._calculate_screenshot_timestamp(chunk.start_time, chunk.end_time)
+            defect_info.ss_timestamp = self._calculate_screenshot_timestamp(chunk["start_time"], chunk["end_time"])
             return defect_info
         
         return None
     
-    def _filter_relevant_chunks(self, refined_chunks: List[RefinedTranscriptChunk]) -> List[RefinedTranscriptChunk]:
+    #-------------------------------------------------------------------------------
+    def _filter_relevant_chunks(self, refined_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Filter chunks that contain relevant defect information"""
         relevant_keywords = [
             'building', 'apartments', 'apartment', 'department',
@@ -799,7 +730,7 @@ class VideoProcessor:
         
         relevant_chunks = []
         for chunk in refined_chunks:
-            description_lower = chunk.description.lower()
+            description_lower = chunk["description"].lower()
             
             # Check if chunk contains any relevant keywords
             if any(keyword in description_lower for keyword in relevant_keywords):
@@ -807,7 +738,7 @@ class VideoProcessor:
         
         return relevant_chunks
     
-    def _extract_context_from_chunks(self, refined_chunks: List[RefinedTranscriptChunk]):
+    def _extract_context_from_chunks(self, refined_chunks: List[Dict[str, Any]]):
         """Extract building/apartment context from all chunks"""
         # Reset context
         self.building_counter = 0
@@ -815,7 +746,7 @@ class VideoProcessor:
         self.current_apartment_number = None
         
         for chunk in refined_chunks:
-            description = chunk.description.lower()
+            description = chunk["description"].lower()
             
             # Extract building information
             if any(keyword in description for keyword in ['building', 'department']):
@@ -823,7 +754,7 @@ class VideoProcessor:
                 if building_info:
                     self.building_counter += 1
                     self.current_building_name = building_info.get('name')
-                    logger.info("Building detected: %s -> building%d", chunk.description.strip(), self.building_counter)
+                    logger.info("Building detected: %s -> building%d", chunk["description"].strip(), self.building_counter)
             
             # Extract apartment number
             if 'apartment' in description:
@@ -1079,7 +1010,7 @@ class VideoProcessor:
         
         # Step 2: Extract audio
         audio_path = os.path.join(output_dir, "extracted_audio.wav")
-        self.extract_audio_from_video(video_path, audio_path)
+        #self.extract_audio_from_video(video_path, audio_path)
         
         # Step 3: Transcribe audio
         transcript_result = self.transcribe_audio(audio_path)
@@ -1099,11 +1030,8 @@ class VideoProcessor:
         # Save refined transcript chunks
         refined_chunks_file = os.path.join(output_dir, "2_formated_transcript_chunks.json")
         with open(refined_chunks_file, 'w', encoding='utf-8') as f:
-            json.dump([chunk.model_dump() for chunk in formated_transcript_chunks], f, indent=2)
+            json.dump(formated_transcript_chunks, f, indent=2)
 
-        # Step 4.5: Convert formated chunks to dictionary format
-        defects_data = self._convert_chunks_to_dict_format(formated_transcript_chunks)
-        
         # Step 4.6: Semantic processing of formated chunks with retry logic
         llms_refined_transcript_cunks = None
         max_retries = 3
@@ -1112,7 +1040,7 @@ class VideoProcessor:
             try:
                 logger.info("Attempting LLM processing (attempt %d/%d)...", attempt + 1, max_retries)
                 llms_refined_transcript_cunks = refine_transcript_chunks_symmentically(
-                                defects_data=defects_data,
+                                defects_data=formated_transcript_chunks,
                                 save_to_file="output/3_refined_transcript_llm.json",
                                 verbose=True
                 )
@@ -1138,17 +1066,10 @@ class VideoProcessor:
         # Fallback: Use original formated chunks if LLM processing fails
         if llms_refined_transcript_cunks is None:
             logger.warning("⚠️ LLM processing failed after %d attempts. Using original formated chunks as fallback.", max_retries)
-            # Convert formated_transcript_chunks back to dictionary format for consistency
-            llms_refined_transcript_cunks = self._convert_chunks_to_dict_format(formated_transcript_chunks)
-        
-        print("xyz")
-        print(llms_refined_transcript_cunks)
-        
-        # Step 4.7: Convert dictionary format back to RefinedTranscriptChunk objects
-        refined_chunks_for_extraction = self._convert_dict_to_chunks(llms_refined_transcript_cunks)
+            llms_refined_transcript_cunks = formated_transcript_chunks
         
         # Step 5: Extract defects using refined chunks
-        defects = self.extract_defects_using_regs(refined_chunks_for_extraction)
+        defects = self.extract_defects_using_regs(llms_refined_transcript_cunks)
 
         
         # Save defects for debugging
@@ -1169,7 +1090,7 @@ class VideoProcessor:
                 logger.error("Failed to capture screenshots: %s", e)
                 # Create defects_with_image_path without screenshots
                 for defect in defects:
-                    defect_dict = defect.model_dump() if hasattr(defect, 'model_dump') else {}
+                    defect_dict = defect.model_dump()
                     defect_dict['image_path'] = None
                     defect_dict['image_filename'] = None
                     defects_with_image_path.append(defect_dict)
@@ -1256,7 +1177,7 @@ def process_video_and_generate_report(
         
         # Initialize video processor
         processor = VideoProcessor(
-            whisper_model_name="small.en",
+            whisper_model_name="base.en",
             openai_api_key=openai_api_key
         )
         

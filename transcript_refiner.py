@@ -14,32 +14,6 @@ import json
 
 # Initialize OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# ===========================================
-# LOAD DEFECTS DATA FROM INPUT.JSON
-# ===========================================
-def load_defects_data():
-    """Load defects data from input.json file."""
-    try:
-        with open('input.json', 'r') as f:
-            defects_data = json.load(f)
-        print(f"✅ Loaded {len(defects_data)} defects from input.json")
-        return defects_data
-    except FileNotFoundError:
-        print("❌ Error: input.json not found!")
-        print("Please make sure input.json is in the current directory.")
-        return []
-    except json.JSONDecodeError as e:
-        print(f"❌ Error: Invalid JSON in input.json - {e}")
-        return []
-    except Exception as e:
-        print(f"❌ Error loading input.json: {e}")
-        return []
-
-# ===========================================
-# MANUAL DEFECTS DATA (Alternative to loading from file)
-# ===========================================
-
 # Function schema - only keep description, start_time, end_time
 tools = [
     {
@@ -58,9 +32,8 @@ tools = [
                                 "description": {"type": "string"},
                                 "start_time": {"type": "number"},
                                 "end_time": {"type": "number"},
-                                "tread_number": {"type": "integer"},
                             },
-                            "required": ["description", "start_time", "end_time", "tread_number"]
+                            "required": ["description", "start_time", "end_time"]
                         }
                     }
                 },
