@@ -84,7 +84,7 @@ defects = processor.process_video(video_source)
 ### Command Line Usage
 
 ```bash
-python main.py
+python video_analyser_service.py
 ```
 
 ## Configuration
@@ -137,7 +137,7 @@ The script generates structured defect information:
 
 ```
 project/
-├── main.py              # Main processing script
+├── video_analyser_service.py  # Main processing script
 ├── config.py            # Configuration settings
 ├── test_script.py       # Test and validation script
 ├── requirements.txt     # Python dependencies

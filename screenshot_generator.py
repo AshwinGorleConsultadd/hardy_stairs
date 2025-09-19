@@ -245,4 +245,4 @@ if __name__ == "__main__":
         print(f"Report generated: {csv_path}")
     else:
         print(f"Defects file not found: {defects_file}")
-        print("Run main.py first to generate defects.")
+        print("Run video_analyser_service.py first to generate defects.")

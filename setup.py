@@ -124,7 +124,7 @@ def main():
     print("1. Place your test video in the 'input' directory")
     print("2. Set OPENAI_API_KEY environment variable (optional)")
     print("3. Run: python test_script.py")
-    print("4. Run: python main.py")
+    print("4. Run: python video_analyser_service.py")
     
     return True
 

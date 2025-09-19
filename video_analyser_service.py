@@ -13,6 +13,8 @@ from typing import List, Optional, Dict, Any
 
 from langchain_core.language_models import llms
 from transcript_refiner import refine_transcript_chunks_symmentically
+from defect_description_extracter import extract_defect_from_chunk, calculate_screenshot_timestamp
+from models import DefectInfo
 
 # Audio processing imports
 import whisper
@@ -43,24 +45,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-class DefectInfo(BaseModel):
-    """Pydantic model for structured defect information"""
-    building_counter: Optional[str] = Field(None, description="Building counter (building1, building2, etc.)")
-    building_name: Optional[str] = Field(None, description="Building name if mentioned in video")
-    apartment_number: Optional[str] = Field(None, description="Apartment number")
-    tread_number: Optional[str] = Field(None, description="Tread number mentioned")
-    priority: Optional[str] = Field(None, description="Priority level (1, 2, etc.) or (one, two, etc.)")
-    description: Optional[str] = Field(None, description="Description of the defect, like (bottom rear crack, front rear crack, top front crack, top rear crack, etc.)")
-    timestamp_start: Optional[float] = Field(None, description="Start timestamp in seconds")
-    timestamp_end: Optional[float] = Field(None, description="End timestamp in seconds")
-    ss_timestamp: Optional[float] = Field(None, description="Estimated timestamp for taking screenshot")
-    transcript_segment: Optional[str] = Field(None, description="Original transcript segment")
-
-
 class VideoProcessor:
     """Main class for processing repair videos and extracting defect information"""
     
-    def __init__(self, whisper_model_name: str = "base.en", openai_api_key: Optional[str] = None):
+    def __init__(self, whisper_model_name: str = "small.en", openai_api_key: Optional[str] = None):
         """
         Initialize the video processor
         
@@ -164,11 +152,11 @@ class VideoProcessor:
             Path to the extracted audio file
         """
         try:
-            # Check if audio file already exists
-            # if os.path.exists(output_audio_path):
-            #     logger.info("Audio file already exists: %s", output_audio_path)
-            #     logger.info("Skipping audio extraction - using existing file")
-            #     return output_audio_path
+            #Check if audio file already exists
+            if os.path.exists(output_audio_path):
+                logger.info("Audio file already exists: %s", output_audio_path)
+                logger.info("Skipping audio extraction - using existing file")
+                return output_audio_path
             
             logger.info("Extracting audio from video: %s", video_path)
             
@@ -212,140 +200,6 @@ class VideoProcessor:
         except Exception as e:
             logger.error("Failed to transcribe audio: %s", e)
             raise
-    
-    def create_llm_prompt(self) -> PromptTemplate:
-        """Create the prompt template for LLM-based data extraction"""
-        template = """
-        You are an expert at extracting structured defect information from building inspection transcripts.
-        
-        Given the following transcript chunk, extract defect information. Focus on understanding the context and meaning.
-        
-        IMPORTANT CONTEXT UNDERSTANDING:
-        - Transcript segments may be fragmented across multiple lines
-        - A single defect might be split across multiple segments
-        - Example: "Tread number 6 priority." + "1 top front crack." = Complete defect: "Tread number 6 priority 1 top front crack"
-        - Look for patterns like: "Tread number X, priority Y"
-        
-        EXTRACTION RULES:
-        1. Extract complete defect information by combining fragmented segments
-        2. Look for tread numbers (may be written as "tread 9", "tread number 9", "tread nine", "tri 8")
-        3. Look for priorities (may be written as "priority 1", "priority one", "priority 2", "priority two")
-        4. Look for defect descriptions (top/bottom/front/rear + crack/defect etc)
-        5. Use the timestamp from the segment that contains the main defect description
-        6. Handle misspellings intelligently (thread -> tread, tred -> tread -> tri, etc.)
-        
-        BUILDING/APARTMENT CONTEXT:
-        - If you see "apartment 111", "department 123", "building 2" - note these for context
-        - These will be added automatically by the system
-        Transcript chunk:
-        {transcript_segments}
-        
-        {format_instructions}
-        """
-        
-        return PromptTemplate(
-            template=template,
-            input_variables=["transcript_segments"],
-            partial_variables={"format_instructions": PydanticOutputParser(pydantic_object=List[DefectInfo]).get_format_instructions()}
-        )
-    
-    def extract_defects_with_llm(self, transcript_result: Dict[str, Any]) -> List[DefectInfo]:
-        """
-        Extract defect information using LLM with structured output
-        
-        Args:
-            transcript_result: Whisper transcription result
-            
-        Returns:
-            List of DefectInfo objects
-        """
-        if  self.llm:
-            logger.warning("LLM not initialized, falling back to rule-based extraction")
-            return self.extract_defects_rule_based(transcript_result)
-        
-        try:
-            # Prepare transcript segments with timestamps
-            segments_text = []
-            for segment in transcript_result.get('segments', []):
-                start_time = segment.get('start', 0)
-                end_time = segment.get('end', 0)
-                text = segment.get('text', '').strip()
-                
-                if text:
-                    segments_text.append(f"[{start_time:.2f}s - {end_time:.2f}s] {text}")
-            
-            transcript_segments = "\n".join(segments_text)
-            
-            # Create prompt and parse output
-            parser = PydanticOutputParser(pydantic_object=List[DefectInfo])
-            prompt = self.create_llm_prompt()
-            
-            formatted_prompt = prompt.format(transcript_segments=transcript_segments)
-            response = self.llm(formatted_prompt)
-            
-            # Parse the response
-            defects = parser.parse(response)
-            
-            # Add timestamp information from original segments
-            self._enrich_defects_with_timestamps(defects, transcript_result)
-            
-            logger.info("Extracted %d defects using LLM", len(defects))
-            return defects
-            
-        except Exception as e:
-            logger.error("LLM extraction failed: %s", e)
-            logger.info("Falling back to rule-based extraction")
-            return self.extract_defects_rule_based(transcript_result)
-    
-    
-    def extract_defects_rule_based(self, transcript_result: Dict[str, Any]) -> List[DefectInfo]:
-        """
-        Fallback rule-based extraction when LLM is not available
-        
-        Args:
-            transcript_result: Whisper transcription result
-            
-        Returns:
-            List of DefectInfo objects
-        """
-        defects = []
-        
-        # Reset building tracking for new video
-        self.building_counter = 0
-        self.current_building_name = None
-        self.current_apartment_number = None
-        
-        for segment in transcript_result.get('segments', []):
-            text = segment.get('text', '').strip().lower()
-            start_time = segment.get('start', 0)
-            end_time = segment.get('end', 0)
-            
-            # Extract building information
-            if any(keyword in text for keyword in ['building', 'department']):
-                building_info = self._extract_building_info(text)
-                if building_info:
-                    self.building_counter += 1
-                    self.current_building_name = building_info.get('name')
-                    logger.info("Building detected: %s -> building%d", text.strip(), self.building_counter)
-            
-            # Extract apartment number
-            if 'apartment' in text:
-                apartment_match = self._extract_apartment_number(text)
-                if apartment_match:
-                    self.current_apartment_number = apartment_match
-            
-            # Extract defect information
-            if any(keyword in text for keyword in ['tread', 'thread', 'tred', 'crack', 'defect']):
-                defect_info = self._extract_defect_from_text(text, start_time, end_time)
-                if defect_info:
-                    defect_info.building_counter = f"building{self.building_counter}" if self.building_counter > 0 else None
-                    defect_info.building_name = self.current_building_name
-                    defect_info.apartment_number = self.current_apartment_number
-                    defect_info.transcript_segment = segment.get('text', '')
-                    defects.append(defect_info)
-        
-        logger.info("Extracted %d defects using rule-based method", len(defects))
-        return defects
     
     def _extract_building_info(self, text: str) -> Optional[Dict[str, str]]:
         """Extract building information from text"""
@@ -404,119 +258,11 @@ class VideoProcessor:
                 return match.group(1)
         return None
     
-    def _extract_defect_from_text(self, text: str, start_time: float, end_time: float) -> Optional[DefectInfo]:
-        """Extract defect information from text segment"""
-        
-        # Look for tread patterns
-        tread_patterns = [
-            r'(?:tread|thread|tred)\s+(\d+)',
-            r'tread\s+number\s+(\d+)'
-        ]
-        
-        tread_number = None
-        for pattern in tread_patterns:
-            match = re.search(pattern, text)
-            if match:
-                tread_number = match.group(1)
-                break
-        
-        # Look for priority patterns
-        priority_patterns = [
-            r'priority\s+(\d+)',
-            r'priority\s+(one|two|three|four|five)'
-        ]
-        
-        priority = None
-        for pattern in priority_patterns:
-            match = re.search(pattern, text)
-            if match:
-                priority = match.group(1)
-                break
-        
-        # Look for defect descriptions
-        defect_keywords = ['crack', 'defect', 'damage', 'wear', 'broken']
-        description = None
-        for keyword in defect_keywords:
-            if keyword in text:
-                # Extract surrounding context
-                words = text.split()
-                keyword_index = words.index(keyword) if keyword in words else -1
-                if keyword_index >= 0:
-                    start_idx = max(0, keyword_index - 2)
-                    end_idx = min(len(words), keyword_index + 3)
-                    description = ' '.join(words[start_idx:end_idx])
-                    break
-        
-        if tread_number or priority or description:
-            return DefectInfo(
-                tread_number=tread_number,
-                priority=priority,
-                description=description,
-                timestamp_start=start_time,
-                timestamp_end=end_time
-            )
-        
-        return None
-    
     def _enrich_defects_with_timestamps(self, defects: List[DefectInfo], transcript_result: Dict[str, Any]):
         """Enrich defects with more accurate timestamp information"""
         # This method can be enhanced to provide more precise timestamps
         # based on word-level timestamps from Whisper
         # TODO: Implement word-level timestamp matching
-    
-    def _save_transcript_as_text(self, transcript_result: Dict[str, Any], output_file: str):
-        """
-        Save transcript as a readable text file for evaluation
-        
-        Args:
-            transcript_result: Whisper transcription result
-            output_file: Path to save the text file
-        """
-        try:
-            logger.info("Saving transcript as text file: %s", output_file)
-            
-            with open(output_file, 'w', encoding='utf-8') as f:
-                # Write header
-                f.write("VIDEO TRANSCRIPT\n")
-                f.write("=" * 50 + "\n\n")
-                
-                # Write full text if available
-                if 'text' in transcript_result:
-                    f.write("FULL TRANSCRIPT:\n")
-                    f.write("-" * 20 + "\n")
-                    f.write(transcript_result['text'] + "\n\n")
-                
-                # Write segmented transcript with timestamps
-                if 'segments' in transcript_result:
-                    f.write("SEGMENTED TRANSCRIPT WITH TIMESTAMPS:\n")
-                    f.write("-" * 40 + "\n")
-                    
-                    for i, segment in enumerate(transcript_result['segments'], 1):
-                        start_time = segment.get('start', 0)
-                        end_time = segment.get('end', 0)
-                        text = segment.get('text', '').strip()
-                        
-                        # Format timestamp as MM:SS.mmm
-                        start_formatted = f"{int(start_time//60):02d}:{start_time%60:06.3f}"
-                        end_formatted = f"{int(end_time//60):02d}:{end_time%60:06.3f}"
-                        
-                        f.write(f"[{start_formatted} --> {end_formatted}] {text}\n")
-                
-                # Write summary
-                f.write("\n" + "=" * 50 + "\n")
-                f.write("TRANSCRIPT SUMMARY:\n")
-                f.write(f"Total duration: {transcript_result.get('duration', 0):.2f} seconds\n")
-                f.write(f"Number of segments: {len(transcript_result.get('segments', []))}\n")
-                f.write(f"Language detected: {transcript_result.get('language', 'unknown')}\n")
-            
-            logger.info("Transcript text file saved successfully")
-            
-        except Exception as e:
-            logger.error("Failed to save transcript text file: %s", e)
-            raise
-    
-
-
 
     def create_formated_transcript_chunks(self, transcript_result: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
@@ -565,157 +311,17 @@ class VideoProcessor:
             
             # Look for defect patterns
             if any(keyword in description for keyword in ['tread', 'track', 'try', 'tri', 'tred', 'thread']):
-                defect_info = self._extract_defect_from_chunk(chunk)
+                defect_info = extract_defect_from_chunk(chunk)
                 if defect_info:
                     defect_info.building_counter = f"building{self.building_counter}" if self.building_counter > 0 else None
                     defect_info.building_name = self.current_building_name
                     defect_info.apartment_number = self.current_apartment_number
-                    defect_info.ss_timestamp = self._calculate_screenshot_timestamp(defect_info.timestamp_start, defect_info.timestamp_end)
+                    defect_info.ss_timestamp = calculate_screenshot_timestamp(defect_info.timestamp_start, defect_info.timestamp_end)
                     defects.append(defect_info)
         
         logger.info("Extracted %d defects using rule-based method", len(defects))
         return defects
     
-    def _extract_defect_from_chunk(self, chunk: Dict[str, Any]) -> Optional[DefectInfo]:
-        """Extract defect information from a single refined chunk with improved accuracy"""
-        description = chunk["description"].lower()
-        
-        # Word to number mapping for tread numbers and priorities (up to 25)
-        word_to_num = {
-            'one': '1', 'two': '2', 'three': '3', 'four': '4', 'five': '5',
-            'six': '6', 'seven': '7', 'eight': '8', 'nine': '9', 'ten': '10',
-            'eleven': '11', 'twelve': '12', 'thirteen': '13', 'fourteen': '14', 'fifteen': '15',
-            'sixteen': '16', 'seventeen': '17', 'eighteen': '18', 'nineteen': '19', 'twenty': '20',
-            'twenty-one': '21', 'twenty-two': '22', 'twenty-three': '23', 'twenty-four': '24', 'twenty-five': '25',
-            'twentyone': '21', 'twentytwo': '22', 'twentythree': '23', 'twentyfour': '24', 'twentyfive': '25'
-        }
-        
-        # Extract tread number - IMPROVED to handle alphabetic numbers (up to 25)
-        tread_patterns = [
-            # Numeric patterns
-            r'(?:tread|track|try|tri|tred|thread)\s+(?:number\s+)?(\d+)',
-            r'(?:tread|track|try|tri|tred|thread)\s+(\d+)',
-            r'(\d+)\s+(?:tread|track|try|tri|tred|thread)',
-            # Alphabetic patterns (up to 25)
-            r'(?:tread|track|try|tri|tred|thread)\s+(?:number\s+)?(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two|twenty-three|twenty-four|twenty-five|twentyone|twentytwo|twentythree|twentyfour|twentyfive)',
-            r'(?:tread|track|try|tri|tred|thread)\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two|twenty-three|twenty-four|twenty-five|twentyone|twentytwo|twentythree|twentyfour|twentyfive)',
-            r'(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two|twenty-three|twenty-four|twenty-five|twentyone|twentytwo|twentythree|twentyfour|twentyfive)\s+(?:tread|track|try|tri|tred|thread)'
-        ]
-        
-        tread_number = None
-        for pattern in tread_patterns:
-            match = re.search(pattern, description)
-            if match:
-                tread_val = match.group(1)
-                # Convert word to number if needed
-                tread_number = word_to_num.get(tread_val, tread_val)
-                break
-        
-        # Extract priority - IMPROVED to handle more word variations (up to 25)
-        priority_patterns = [
-            r'priority\s+(\d+)',
-            r'priority\s+(one|two|three|four|five|six)',
-            r'(\d+)\s+priority',
-            r'(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two|twenty-three|twenty-four|twenty-five|twentyone|twentytwo|twentythree|twentyfour|twentyfive)\s+priority'
-        ]
-        
-        priority = None
-        for pattern in priority_patterns:
-            match = re.search(pattern, description)
-            if match:
-                priority_val = match.group(1)
-                # Convert word to number
-                priority = word_to_num.get(priority_val, priority_val)
-                break
-        
-        # Extract COMPLETE defect description - MAJOR IMPROVEMENT
-        defect_description = None
-        
-        # Strategy 1: Extract complete defect description after priority
-        # Look for patterns like "priority X, [complete description]"
-        priority_desc_pattern = r'priority\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*,\s*([^,]+?)(?:,|screenshot|$)'
-        match = re.search(priority_desc_pattern, description, re.IGNORECASE)
-        if match:
-            defect_description = match.group(1).strip()
-        
-        # Strategy 2: Extract complete description between tread and screenshot/end
-        if not defect_description:
-            tread_desc_pattern = r'(?:tread|track|try|tri|tred|thread).*?priority.*?,\s*([^,]+?)(?:,|screenshot|$)'
-            match = re.search(tread_desc_pattern, description, re.IGNORECASE)
-            if match:
-                defect_description = match.group(1).strip()
-        
-        # Strategy 3: Look for comprehensive defect patterns
-        if not defect_description:
-            comprehensive_patterns = [
-                # Pattern: "top front and rear cracks"
-                r'(top|bottom|front|rear|center)\s+(front|rear|top|bottom|center)?\s*(?:and\s+)?(front|rear|top|bottom|center)?\s*(crack|cracks|defect|defects)',
-                # Pattern: "front and rear crack"
-                r'(front|rear|top|bottom|center)\s+and\s+(front|rear|top|bottom|center)\s+(crack|cracks|defect|defects)',
-                # Pattern: "top, front and rear cracks"
-                r'(top|bottom|front|rear|center),\s*(front|rear|top|bottom|center)\s+and\s+(front|rear|top|bottom|center)\s+(crack|cracks|defect|defects)',
-                # Simple patterns
-                r'(top|bottom|front|rear|center)\s+(crack|cracks|defect|defects)',
-                r'(crack|cracks|defect|defects)\s+(top|bottom|front|rear|center)'
-            ]
-            
-            for pattern in comprehensive_patterns:
-                match = re.search(pattern, description, re.IGNORECASE)
-                if match:
-                    defect_description = match.group(0).strip()
-                    break
-        
-        # Strategy 4: Extract everything after the last comma before screenshot/end
-        if not defect_description:
-            # Find the last comma and extract everything after it (before screenshot/end)
-            comma_pattern = r',\s*([^,]+?)(?:,|screenshot|$)'
-            matches = re.findall(comma_pattern, description, re.IGNORECASE)
-            if matches:
-                # Take the last match (most likely the description)
-                potential_desc = matches[-1].strip()
-                # Check if it contains defect keywords
-                if any(keyword in potential_desc for keyword in ['crack', 'defect', 'damage', 'wear', 'broken', 'top', 'bottom', 'front', 'rear']):
-                    defect_description = potential_desc
-        
-        # Strategy 5: Fallback - extract any crack/defect mention with better context
-        if not defect_description:
-            defect_keywords = ['crack', 'defect', 'damage', 'wear', 'broken']
-            for keyword in defect_keywords:
-                if keyword in description:
-                    # Extract surrounding context (improved)
-                    words = description.split()
-                    keyword_index = words.index(keyword) if keyword in words else -1
-                    if keyword_index >= 0:
-                        # Look backwards and forwards for location words
-                        start_idx = max(0, keyword_index - 3)
-                        end_idx = min(len(words), keyword_index + 4)
-                        context_words = words[start_idx:end_idx]
-                        
-                        # Reconstruct the description
-                        defect_description = ' '.join(context_words)
-                        break
-        
-        # Clean up the description
-        if defect_description:
-            # Remove common trailing words
-            defect_description = re.sub(r'\s+(screenshot|screen\s+shot|,)$', '', defect_description, flags=re.IGNORECASE)
-            defect_description = defect_description.strip()
-        
-        # Extract defect if we have any relevant information
-        if tread_number or priority or defect_description:
-            defect_info = DefectInfo(
-                tread_number=tread_number,
-                priority=priority,
-                description=defect_description,
-                timestamp_start=chunk["start_time"],
-                timestamp_end=chunk["end_time"],
-                transcript_segment=chunk["description"]
-            )
-            # Calculate screenshot timestamp
-            defect_info.ss_timestamp = self._calculate_screenshot_timestamp(chunk["start_time"], chunk["end_time"])
-            return defect_info
-        
-        return None
     
     #-------------------------------------------------------------------------------
     def _filter_relevant_chunks(self, refined_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -860,23 +466,6 @@ class VideoProcessor:
         
         return defects
     
-    def _calculate_screenshot_timestamp(self, start_time: float, end_time: float) -> float:
-        """Calculate optimal timestamp for taking screenshot"""
-        if start_time is None or end_time is None:
-            return None
-         
-        # Calculate the duration of the timestamp range
-        duration = end_time - start_time
-        
-        # Take screenshot at the start of the 3rd portion (2/3 of the way through)
-        # For a 12-second range: 0 to 12 seconds
-        # 1st portion: 0-4 seconds (0 to 1/3)
-        # 2nd portion: 4-8 seconds (1/3 to 2/3) 
-        # 3rd portion: 8-12 seconds (2/3 to end)
-        # Screenshot at: 8 seconds (start of 3rd portion)
-        screenshot_time = start_time + (duration * 2/3)
-        
-        return screenshot_time 
     
     def _create_defect_extraction_prompt(self) -> PromptTemplate:
         """Create the prompt template for defect extraction"""
@@ -1020,9 +609,6 @@ class VideoProcessor:
         with open(transcript_file, 'w', encoding='utf-8') as f:
             json.dump(transcript_result, f, indent=2)
         
-        # Save transcript as readable text file for evaluation
-        transcript_text_file = os.path.join(output_dir, "transcript.txt")
-        self._save_transcript_as_text(transcript_result, transcript_text_file)
         
         # Step 4: Create refined transcript chunks
         formated_transcript_chunks = self.create_formated_transcript_chunks(transcript_result)
@@ -1078,6 +664,27 @@ class VideoProcessor:
             json.dump([defect.model_dump() for defect in defects], f, indent=2)
         
         logger.info("Processing completed. Found %d defects.", len(defects))
+        
+        # Print all defects to terminal
+        print("\n" + "="*80)
+        print("📋 EXTRACTED DEFECTS SUMMARY")
+        print("="*80)
+        for i, defect in enumerate(defects, 1):
+            print(f"\n🔍 Defect #{i}:")
+            print(f"  Building: {defect.building_counter} ({defect.building_name})")
+            print(f"  Apartment: {defect.apartment_number}")
+            print(f"  Tread: {defect.tread_number}")
+            print(f"  Priority: {defect.priority}")
+            print(f"  Description: {defect.description}")
+            timestamp_start = f"{defect.timestamp_start:.2f}" if defect.timestamp_start is not None else "None"
+            timestamp_end = f"{defect.timestamp_end:.2f}" if defect.timestamp_end is not None else "None"
+            ss_timestamp = f"{defect.ss_timestamp:.2f}" if defect.ss_timestamp is not None else "None"
+            print(f"  Time Range: {timestamp_start}s - {timestamp_end}s")
+            print(f"  Screenshot Time: {ss_timestamp}s")
+            print(f"  Transcript: {defect.transcript_segment}")
+        print("="*80)
+        print(f"Total defects found: {len(defects)}")
+        print("="*80 + "\n")
         
         # Step 6.5: Take screenshots for defects
         defects_with_image_path = []
@@ -1177,7 +784,7 @@ def process_video_and_generate_report(
         
         # Initialize video processor
         processor = VideoProcessor(
-            whisper_model_name="base.en",
+            whisper_model_name="small.en",
             openai_api_key=openai_api_key
         )
         

@@ -4,7 +4,7 @@ Simple Entry Point for Video Processing Pipeline
 This file serves as a simple entry point that calls the main processing function.
 """
 
-from main import process_video_and_generate_report
+from video_analyser_service import process_video_and_generate_report
 
 def main():
     """Simple entry point - just call the function and get report URL"""
