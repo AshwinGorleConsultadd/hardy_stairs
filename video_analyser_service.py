@@ -15,6 +15,8 @@ from langchain_core.language_models import llms
 from transcript_refiner import refine_transcript_chunks_symmentically
 from defect_description_extracter import extract_defect_from_chunk, calculate_screenshot_timestamp
 from models import DefectInfo
+from fuzzywuzzy import fuzz
+import string
 
 # Audio processing imports
 import whisper
@@ -152,11 +154,6 @@ class VideoProcessor:
             Path to the extracted audio file
         """
         try:
-            #Check if audio file already exists
-            if os.path.exists(output_audio_path):
-                logger.info("Audio file already exists: %s", output_audio_path)
-                logger.info("Skipping audio extraction - using existing file")
-                return output_audio_path
             
             logger.info("Extracting audio from video: %s", video_path)
             
@@ -296,32 +293,131 @@ class VideoProcessor:
 
     #-------------------------------------------------------------------------------
     def extract_defects_using_regs(self, refined_chunks: List[Dict[str, Any]]) -> List[DefectInfo]:
-        """Rule-based defect extraction from refined chunks (fallback when LLM not available)"""
+        """Rule-based defect extraction with sequential building/apartment tracking"""
         defects = []
         
-        # Extract context first
-        self._extract_context_from_chunks(refined_chunks)
+        # Initialize tracking variables
+        last_building_number = None
+        last_apartment_number = None
+        building_counter = 0
         
-        # Filter relevant chunks
-        relevant_chunks = self._filter_relevant_chunks(refined_chunks)
-        logger.info("Using rule-based extraction on %d relevant chunks", len(relevant_chunks))
+        logger.info("Processing %d chunks sequentially for building/apartment tracking", len(refined_chunks))
         
-        for chunk in relevant_chunks:
-            description = chunk["description"].lower()
+        # Safety check for empty or None list
+        if not refined_chunks:
+            logger.warning("⚠️ No refined chunks to process")
+            return []
+        
+        # Process chunks sequentially - track context AND extract defects in one pass
+        for i, chunk in enumerate(refined_chunks):
+            # Safety check for None chunks
+            if chunk is None:
+                logger.warning("⚠️ 🔴Skipping None chunk at index %d", i)
+                continue
             
-            # Look for defect patterns
-            if any(keyword in description for keyword in ['tread', 'track', 'try', 'tri', 'tred', 'thread']):
-                defect_info = extract_defect_from_chunk(chunk)
-                if defect_info:
-                    defect_info.building_counter = f"building{self.building_counter}" if self.building_counter > 0 else None
-                    defect_info.building_name = self.current_building_name
-                    defect_info.apartment_number = self.current_apartment_number
-                    defect_info.ss_timestamp = calculate_screenshot_timestamp(defect_info.timestamp_start, defect_info.timestamp_end)
-                    defects.append(defect_info)
+            # Safety check for missing description
+            if not isinstance(chunk, dict) or "description" not in chunk:
+                logger.warning("⚠️ 🔴Skipping invalid chunk at index %d: %s", i, chunk)
+                continue
+            
+            description = chunk["description"]
+            if not description:
+                logger.warning("⚠️ 🔴Skipping chunk with empty description at index %d", i)
+                continue
+                
+            logger.info("📝 Processing chunk %d/%d: %s", i+1, len(refined_chunks), description[:100])
+            logger.debug("🔍 Chunk data: %s", chunk)
+            
+            # Update building and apartment numbers if found in this chunk
+            building_num, apartment_num = self._extract_building_apartment_from_chunk(description)
+            
+            if building_num:
+                building_counter += 1
+                last_building_number = building_num
+                logger.info("🏢 Building detected: %s -> building%d", description.strip(), building_counter)
+            
+            if apartment_num:
+                last_apartment_number = apartment_num
+                logger.info("🏠 Apartment detected: %s", apartment_num)
+            
+            # Check if this chunk contains defect information
+            description_lower = description.lower()
+            if any(keyword in description_lower for keyword in ['tread', 'track', 'try', 'tri', 'tred', 'thread']):
+                try:
+                    defect_info = extract_defect_from_chunk(chunk)
+                    if defect_info:
+                        # Assign the current building/apartment numbers (not the final ones)
+                        defect_info.building_counter = f"building{building_counter}" if building_counter > 0 else None
+                        defect_info.apartment_number = last_apartment_number
+                        defect_info.ss_timestamp = calculate_screenshot_timestamp(defect_info.timestamp_start, defect_info.timestamp_end)
+                        defects.append(defect_info)
+                        logger.info("🔍 Defect extracted: %s (Building: %s, Apartment: %s)", 
+                                   defect_info.description[:50], defect_info.building_counter, defect_info.apartment_number)
+                except Exception as e:
+                    logger.error("❌ Error extracting defect from chunk %d: %s", i, e)
+                    logger.error("   Chunk data: %s", chunk)
         
         logger.info("Extracted %d defects using rule-based method", len(defects))
+        
+        # Log summary of building/apartment tracking
+        logger.info("📊 Final tracking summary:")
+        logger.info("   🏢 Building counter: %d", building_counter)
+        logger.info("   🏠 Last apartment number: %s", last_apartment_number)
+        logger.info("   📋 Defects extracted: %d", len(defects))
+        
         return defects
     
+    def _clean_word(self, word: str) -> str:
+        """Clean word by removing punctuation and converting to lowercase"""
+        return word.strip(string.punctuation).lower()
+    
+    def _fuzzy_find(self, word: str, target: str, threshold: int = 80) -> bool:
+        """Check if word matches target using fuzzy matching"""
+        word = self._clean_word(word)
+        return fuzz.ratio(word, target.lower()) >= threshold
+    
+    def _extract_building_apartment_from_chunk(self, description: str) -> tuple[Optional[str], Optional[str]]:
+        """Extract building and apartment numbers from chunk description using fuzzy matching"""
+        tokens = description.split()
+        building_num = None
+        apartment_num = None
+        
+        # Also check for numbers that might be standalone
+        standalone_numbers = re.findall(r'\b(\d+)\b', description)
+        
+        for i, token in enumerate(tokens):
+            # Check for building keywords
+            if any(self._fuzzy_find(token, kw) for kw in ["building", "department", "andepartment", "bolding", "depart", "bldg"]):
+                if i + 1 < len(tokens):
+                    num = re.sub(r"\D", "", tokens[i + 1])
+                    if num.isdigit():
+                        building_num = num
+                        logger.info("🔍 Found building number: %s after keyword: %s", num, token)
+            
+            # Check for apartment keywords
+            if any(self._fuzzy_find(token, kw) for kw in ["apartment", "aprtmen", "apt", "apt.", "unit"]):
+                if i + 1 < len(tokens):
+                    num = re.sub(r"\D", "", tokens[i + 1])
+                    if num.isdigit():
+                        apartment_num = num
+                        logger.info("🔍 Found apartment number: %s after keyword: %s", num, token)
+        
+        # If we found keywords but no numbers, try to find numbers in the same chunk
+        if not building_num and any(self._fuzzy_find(token, kw) for token in tokens for kw in ["building", "department", "andepartment", "bolding", "depart", "bldg"]):
+            for num in standalone_numbers:
+                if len(num) >= 2:  # Building numbers are usually 2+ digits
+                    building_num = num
+                    logger.info("🔍 Found building number in chunk: %s", num)
+                    break
+        
+        if not apartment_num and any(self._fuzzy_find(token, kw) for token in tokens for kw in ["apartment", "aprtmen", "apt", "apt.", "unit"]):
+            for num in standalone_numbers:
+                if len(num) >= 2:  # Apartment numbers are usually 2+ digits
+                    apartment_num = num
+                    logger.info("🔍 Found apartment number in chunk: %s", num)
+                    break
+        
+        return building_num, apartment_num
     
     #-------------------------------------------------------------------------------
     def _filter_relevant_chunks(self, refined_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -344,62 +440,6 @@ class VideoProcessor:
         
         return relevant_chunks
     
-    def _extract_context_from_chunks(self, refined_chunks: List[Dict[str, Any]]):
-        """Extract building/apartment context from all chunks"""
-        # Reset context
-        self.building_counter = 0
-        self.current_building_name = None
-        self.current_apartment_number = None
-        
-        for chunk in refined_chunks:
-            description = chunk["description"].lower()
-            
-            # Extract building information
-            if any(keyword in description for keyword in ['building', 'department']):
-                building_info = self._extract_building_info(description)
-                if building_info:
-                    self.building_counter += 1
-                    self.current_building_name = building_info.get('name')
-                    logger.info("Building detected: %s -> building%d", chunk["description"].strip(), self.building_counter)
-            
-            # Extract apartment number
-            if 'apartment' in description:
-                apartment_match = self._extract_apartment_number(description)
-                if apartment_match:
-                    self.current_apartment_number = apartment_match
-                    logger.info("Apartment detected: %s", apartment_match)
-    
-   
-        """Process a batch of chunks to extract defects"""
-        try:
-            # Format batch chunks for LLM
-            chunks_text = []
-            for chunk in batch_chunks:
-                chunks_text.append(f"[{chunk.start_time:.2f}s - {chunk.end_time:.2f}s] {chunk.description}")
-            
-            batch_text = "\n".join(chunks_text)
-            
-            # Create LLM prompt for defect extraction
-            prompt = self._create_defect_extraction_prompt()
-            
-            formatted_prompt = prompt.format(transcript_chunks=batch_text)
-            response = self.llm(formatted_prompt)
-            
-            # Parse the response manually
-            defects = self._parse_defect_response(response)
-            
-            # Add context and calculate screenshot timestamps
-            for defect in defects:
-                defect.building_counter = f"building{self.building_counter}" if self.building_counter > 0 else None
-                defect.building_name = self.current_building_name
-                defect.apartment_number = self.current_apartment_number
-                defect.ss_timestamp = self._calculate_screenshot_timestamp(defect.timestamp_start, defect.timestamp_end)
-            
-            return defects
-            
-        except Exception as e:
-            logger.error("Failed to process defect batch: %s", e)
-            return []
     
     def _parse_defect_response(self, response: str) -> List[DefectInfo]:
         """Parse LLM response manually to extract DefectInfo objects"""
@@ -599,7 +639,7 @@ class VideoProcessor:
         
         # Step 2: Extract audio
         audio_path = os.path.join(output_dir, "extracted_audio.wav")
-        #self.extract_audio_from_video(video_path, audio_path)
+        self.extract_audio_from_video(video_path, audio_path)
         
         # Step 3: Transcribe audio
         transcript_result = self.transcribe_audio(audio_path)
@@ -651,7 +691,7 @@ class VideoProcessor:
         
         # Fallback: Use original formated chunks if LLM processing fails
         if llms_refined_transcript_cunks is None:
-            logger.warning("⚠️ LLM processing failed after %d attempts. Using original formated chunks as fallback.", max_retries)
+            logger.warning("⚠️🔴🔴🔴🔴🔴 LLM processing failed after %d attempts. Using original formated chunks as fallback.", max_retries)
             llms_refined_transcript_cunks = formated_transcript_chunks
         
         # Step 5: Extract defects using refined chunks
@@ -846,7 +886,7 @@ def main():
         print()
     
     processor = VideoProcessor(
-        whisper_model_name="base.en",
+        whisper_model_name="small.en",
         openai_api_key=api_key
     )
     

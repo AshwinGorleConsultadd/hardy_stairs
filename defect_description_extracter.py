@@ -11,6 +11,13 @@ from models import DefectInfo
 
 def extract_defect_from_chunk(chunk: Dict[str, Any]) -> Optional[DefectInfo]:
     """Extract defect information from a single refined chunk with improved accuracy"""
+    # Safety check for None or invalid chunk
+    if chunk is None or not isinstance(chunk, dict):
+        return None
+    
+    if "description" not in chunk or not chunk["description"]:
+        return None
+    
     description = chunk["description"].lower()
     
     # Word to number mapping for tread numbers and priorities (up to 25)
@@ -56,7 +63,7 @@ def extract_defect_from_chunk(chunk: Dict[str, Any]) -> Optional[DefectInfo]:
     # Strategy 2: Extract priority (numeric and alphabetic)
     priority_patterns = [
         r'priority\s+(\d+)',
-        r'priority\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two|twenty-three|twenty-four|twenty-five)',
+        r'priority\s+(one|two|three|four|five|six)',
         r'pri\s+(\d+)',
         r'pri\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two|twenty-three|twenty-four|twenty-five)'
     ]
@@ -183,6 +190,10 @@ def calculate_screenshot_timestamp(start_time: float, end_time: float) -> float:
     if start_time is None or end_time is None:
         return None
     
-    duration = end_time - start_time
-    screenshot_time = start_time + (duration * 2/3)
-    return screenshot_time
+    try:
+        duration = end_time - start_time
+        screenshot_time = start_time + (duration * 2/3)
+        return screenshot_time
+    except (TypeError, ValueError) as e:
+        print(f"Error calculating screenshot timestamp: {e}")
+        return None
