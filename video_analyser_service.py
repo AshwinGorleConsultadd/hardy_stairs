@@ -669,21 +669,21 @@ class VideoProcessor:
         print("\n" + "="*80)
         print("📋 EXTRACTED DEFECTS SUMMARY")
         print("="*80)
-        for i, defect in enumerate(defects, 1):
-            print(f"\n🔍 Defect #{i}:")
-            print(f"  Building: {defect.building_counter} ({defect.building_name})")
-            print(f"  Apartment: {defect.apartment_number}")
-            print(f"  Tread: {defect.tread_number}")
-            print(f"  Priority: {defect.priority}")
-            print(f"  Description: {defect.description}")
-            timestamp_start = f"{defect.timestamp_start:.2f}" if defect.timestamp_start is not None else "None"
-            timestamp_end = f"{defect.timestamp_end:.2f}" if defect.timestamp_end is not None else "None"
-            ss_timestamp = f"{defect.ss_timestamp:.2f}" if defect.ss_timestamp is not None else "None"
-            print(f"  Time Range: {timestamp_start}s - {timestamp_end}s")
-            print(f"  Screenshot Time: {ss_timestamp}s")
-            print(f"  Transcript: {defect.transcript_segment}")
+        # for i, defect in enumerate(defects, 1):
+        #     print(f"\n🔍 Defect #{i}:")
+        #     print(f"  Building: {defect.building_counter} ({defect.building_name})")
+        #     print(f"  Apartment: {defect.apartment_number}")
+        #     print(f"  Tread: {defect.tread_number}")
+        #     print(f"  Priority: {defect.priority}")
+        #     print(f"  Description: {defect.description}")
+        #     timestamp_start = f"{defect.timestamp_start:.2f}" if defect.timestamp_start is not None else "None"
+        #     timestamp_end = f"{defect.timestamp_end:.2f}" if defect.timestamp_end is not None else "None"
+        #     ss_timestamp = f"{defect.ss_timestamp:.2f}" if defect.ss_timestamp is not None else "None"
+        #     print(f"  Time Range: {timestamp_start}s - {timestamp_end}s")
+        #     print(f"  Screenshot Time: {ss_timestamp}s")
+        #     print(f"  Transcript: {defect.transcript_segment}")
         print("="*80)
-        print(f"Total defects found: {len(defects)}")
+        print(f"🔵Total defects found: {len(defects)}")
         print("="*80 + "\n")
         
         # Step 6.5: Take screenshots for defects
@@ -736,22 +736,33 @@ class VideoProcessor:
                 logger.error("❌ PDF file not found: %s", local_pdf_path)
                 return None
             
+            # Get file size for logging
+            file_size = os.path.getsize(local_pdf_path)
+            file_size_mb = file_size / (1024 * 1024)
+            
+            logger.info("🚀 Starting S3 upload process...")
+            logger.info("📁 File: %s (%.2f MB)", local_pdf_path, file_size_mb)
+            
             # Read PDF file
             with open(local_pdf_path, 'rb') as f:
                 pdf_data = f.read()
             
             # Upload to S3 using presigned URL
             logger.info("📤 Uploading PDF to S3...")
+            logger.info("⏳ Please wait, this may take a moment...")
+            
             response = requests.put(presigned_s3_url, data=pdf_data, headers={'Content-Type': 'application/pdf'})
             
             if response.status_code == 200:
                 # Extract S3 URL from presigned URL (remove query parameters)
                 s3_url = presigned_s3_url.split('?')[0]
-                logger.info("✅ PDF uploaded successfully to: %s", s3_url)
+                logger.info("🎉 S3 upload completed successfully!")
+                logger.info("✅ PDF uploaded to: %s", s3_url)
+                logger.info("📊 File size: %.2f MB", file_size_mb)
                 return s3_url
             else:
                 logger.error("❌ S3 upload failed with status code: %d", response.status_code)
-                logger.error("Response: %s", response.text)
+                logger.error("📝 Response: %s", response.text)
                 return None
                 
         except Exception as e:
@@ -801,16 +812,19 @@ def process_video_and_generate_report(
         
         # Upload to S3 if requested
         if upload_to_s3 and presigned_s3_url:
-            logger.info("📤 Uploading PDF report to S3...")
+            logger.info("🌐 S3 upload requested - starting upload process...")
             s3_url = processor.upload_pdf_to_s3(local_pdf_path, presigned_s3_url)
             if s3_url:
-                logger.info("✅ PDF uploaded to S3 successfully")
+                logger.info("🎊 S3 upload process completed successfully!")
+                logger.info("🔗 Report URL: %s", s3_url)
                 return s3_url
             else:
-                logger.error("❌ Failed to upload PDF to S3, returning local path")
+                logger.error("⚠️ S3 upload failed, returning local path instead")
+                logger.info("📁 Local report URL: %s", local_pdf_path)
                 return local_pdf_path
         else:
             logger.info("✅ Processing completed, returning local path")
+            logger.info("📁 Local report URL: %s", local_pdf_path)
             return local_pdf_path
             
     except Exception as e:
@@ -832,7 +846,7 @@ def main():
         print()
     
     processor = VideoProcessor(
-        whisper_model_name="small.en",
+        whisper_model_name="base.en",
         openai_api_key=api_key
     )
     
