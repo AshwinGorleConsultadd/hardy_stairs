@@ -10,18 +10,18 @@ import json
 import logging
 import re
 from typing import List, Optional, Dict, Any
-
+from config import AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_REGION
 from langchain_core.language_models import llms
 from transcript_refiner import refine_transcript_chunks_symmentically
 from defect_description_extracter import extract_defect_from_chunk, calculate_screenshot_timestamp
 from models import DefectInfo
 from fuzzywuzzy import fuzz
 import string
-
+import boto3
 # Audio processing imports
 import whisper
 import ffmpeg
-
+from urllib.parse import urlparse
 # LLM and structured output imports
 try:
     from langchain_community.llms import OpenAI
@@ -122,19 +122,30 @@ class VideoProcessor:
             Path to the downloaded video file
         """
         try:
-            import requests
-            
-            logger.info("Downloading video from S3 URL: %s", s3_url)
-            
-            # Download the file
-            response = requests.get(s3_url, stream=True)
-            response.raise_for_status()
-            
-            # Save to local file
-            with open(local_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            
+            s3_client = boto3.client(
+                                "s3",
+                                aws_access_key_id=AWS_ACCESS_KEY_ID,
+                                aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+                                region_name=AWS_REGION
+                            )
+
+
+            # Handle both s3:// and https:// URLs
+            if s3_url.startswith("s3://"):
+                parsed = urlparse(s3_url)
+                bucket = parsed.netloc
+                key = parsed.path.lstrip("/")
+            else:
+                # Assume https://bucket.s3.region.amazonaws.com/key format
+                parsed = urlparse(s3_url)
+                bucket = parsed.netloc.split(".")[0]
+                key = parsed.path.lstrip("/")
+
+            logger.info("Downloading s3://%s/%s -> %s", bucket, key, local_path)
+
+            # Download
+            s3_client.download_file(bucket, key, local_path)
+
             logger.info("Video downloaded to: %s", local_path)
             return local_path
             

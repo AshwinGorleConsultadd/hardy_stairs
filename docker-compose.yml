@@ -1,0 +1,50 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hardy-api
+    # Dev: auto-reload and live code mount
+    command: >
+      uvicorn app_server:app
+      --host 0.0.0.0 --port 8000
+      --reload
+      --proxy-headers --forwarded-allow-ips="*"
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./:/app:rw
+    # In AWS, the container can use the instance role by default;
+    # no AWS creds need to be baked into the image.
+
+    # Healthcheck (simple HTTP ping to /)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/').read(); print('ok')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    # ---- Production profile ----
+    profiles: ["dev"]
+  api-prod:
+    build: .
+    container_name: hardy-api-prod
+    command: >
+      gunicorn app_server:app
+      -k uvicorn.workers.UvicornWorker
+      --bind 0.0.0.0:8000
+      --workers ${GUNICORN_WORKERS:-2}
+      --timeout ${GUNICORN_TIMEOUT:-120}
+      --access-logfile -
+      --error-logfile -
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    restart: unless-stopped
+    profiles: ["prod"]

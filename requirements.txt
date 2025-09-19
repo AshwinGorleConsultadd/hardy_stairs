@@ -1,3 +1,8 @@
+fastapi
+uvicorn
+boto3
+python-dotenv
+
 # Core dependencies
 openai>=1.0.0
 langchain>=0.1.0
@@ -25,3 +30,5 @@ requests>=2.31.0
 jupyter>=1.0.0
 matplotlib>=3.7.0
 seaborn>=0.12.0
+
+fuzzywuzzy
