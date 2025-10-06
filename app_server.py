@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from dotenv import load_dotenv
 import os
 import uuid
@@ -7,6 +7,7 @@ from typing import List, Dict
 from concurrent.futures import ThreadPoolExecutor
 from config import s3_client, S3_BUCKET
 from video_analyser_service import process_video_and_generate_report
+from progress import progress_store
 
 from s3_service import (
     initiate_multipart_upload,
@@ -152,26 +153,76 @@ def process_video(request: ProcessVideoRequest, background_tasks: BackgroundTask
     3. Run `process_video_and_generate_report` as a background task.
     4. Generate a presigned download URL for the frontend to fetch the report.
     """
+   
     # Generate unique report filename
-    report_file = f"reports/{uuid.uuid4()}.pdf"
+    # Generate IDs/paths first
+    task_id = str(uuid.uuid4())
+    report_file = f"reports/{task_id}.pdf"
 
-    # Presigned URL for background upload
+    # Prepare URLs
     presigned_upload_url = generate_presigned_upload_url(report_file)
-
-    # Kick off background processing task
-    background_tasks.add_task(
-        process_video_and_generate_report,
-        video_source_type="s3",
-        video_url=request.fileUrl,
-        presigned_s3_url=presigned_upload_url,
-        upload_to_s3=True
-    )
-
-    # Presigned URL for frontend to download the report
     presigned_download_url = s3_client.generate_presigned_url(
         ClientMethod="get_object",
         Params={"Bucket": S3_BUCKET, "Key": report_file},
         ExpiresIn=3600
     )
 
-    return {"download_url": presigned_download_url}
+    # Initialize progress (visible immediately to clients)
+    progress_store.init(task_id, message="queued")
+
+    # Background work wrapper: marks done/error automatically
+    def _runner():
+        try:
+            progress_store.update(task_id, status="running", message="starting…", percent=1.0)
+            process_video_and_generate_report(
+                video_source_type="s3",
+                video_url=request.fileUrl,
+                presigned_s3_url=presigned_upload_url,
+                upload_to_s3=True,
+                task_id=task_id,                        # <-- pass through
+                progress_callback=progress_store.update # <-- pass through
+            )
+            # If the worker didn’t already set 100%, finalize here:
+            progress_store.update(
+                task_id,
+                status="done",
+                percent=100.0,
+                message="report ready",
+                result={"download_url": presigned_download_url}
+            )
+        except Exception as exc:
+            progress_store.update(
+                task_id,
+                status="error",
+                message=f"failed: {exc.__class__.__name__}",
+            )
+            # Consider logging or Sentry here
+
+    background_tasks.add_task(_runner)
+
+    # Return task_id so the frontend can poll /progress/{task_id}
+    return {
+        "task_id": task_id,
+        "download_url": presigned_download_url  # optional early hint; will be valid once done
+    }
+
+@app.get("/progress/{task_id}")
+def get_progress(task_id: str):
+    """
+    Poll the current progress of a background task.
+    Response example:
+    {
+      "task_id": "...",
+      "status": "running",
+      "percent": 42.0,
+      "message": "Extracting audio...",
+      "started_at": 1695123456.12,
+      "updated_at": 1695123499.90,
+      "result": {"download_url": "..."}   # present when done
+    }
+    """
+    data = progress_store.get(task_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="task_id not found")
+    return data
+

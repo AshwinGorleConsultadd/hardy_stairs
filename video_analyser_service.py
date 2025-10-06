@@ -9,7 +9,8 @@ import os
 import json
 import logging
 import re
-from typing import List, Optional, Dict, Any
+from typing import Callable, List, Optional, Dict, Any
+import uuid
 from config import AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_REGION
 from langchain_core.language_models import llms
 from transcript_refiner import refine_transcript_chunks_symmentically
@@ -619,7 +620,7 @@ class VideoProcessor:
             input_variables=["transcript_chunks"]
         )
     
-    def process_video(self, video_source: Dict[str, str], output_dir: str = "output") -> List[DefectInfo]:
+    def process_video(self, video_source: Dict[str, str], progress_callback: Callable[..., None],task_id,output_dir: str = "output") -> List[DefectInfo]:
         """
         Main method to process a video and extract defect information
         
@@ -647,22 +648,23 @@ class VideoProcessor:
             )
         else:
             raise ValueError("Invalid video source type. Use 'local' or 's3'")
-        
+        progress_callback(task_id, percent=10.0, message="transcribing")
         # Step 2: Extract audio
         audio_path = os.path.join(output_dir, "extracted_audio.wav")
         self.extract_audio_from_video(video_path, audio_path)
         
         # Step 3: Transcribe audio
         transcript_result = self.transcribe_audio(audio_path)
-        
+        progress_callback(task_id, percent=20.0, message="transcribe complete")
         # Save transcript for debugging
         transcript_file = os.path.join(output_dir, "1_transcript.json")
         with open(transcript_file, 'w', encoding='utf-8') as f:
             json.dump(transcript_result, f, indent=2)
         
-        
+        progress_callback(task_id, percent=50.0, message="creating chunks")        
         # Step 4: Create refined transcript chunks
         formated_transcript_chunks = self.create_formated_transcript_chunks(transcript_result)
+        progress_callback(task_id, percent=55.0, message="refining chunks")        
         
         # Save refined transcript chunks
         refined_chunks_file = os.path.join(output_dir, "2_formated_transcript_chunks.json")
@@ -672,6 +674,7 @@ class VideoProcessor:
         # Step 4.6: Semantic processing of formated chunks with retry logic
         llms_refined_transcript_cunks = None
         max_retries = 3
+        progress_callback(task_id, percent=60.0, message="starting  LLM processing")        
         
         for attempt in range(max_retries):
             try:
@@ -708,6 +711,7 @@ class VideoProcessor:
         # Step 5: Extract defects using refined chunks
         defects = self.extract_defects_using_regs(llms_refined_transcript_cunks)
 
+        progress_callback(task_id, percent=70.0, message="Extracting Defects")        
         
         # Save defects for debugging
         defects_file = os.path.join(output_dir, "4_extracted_defects.json")
@@ -736,6 +740,7 @@ class VideoProcessor:
         print("="*80)
         print(f"🔵Total defects found: {len(defects)}")
         print("="*80 + "\n")
+        progress_callback(task_id, percent=80.0, message="Extracting ScreenShots")        
         
         # Step 6.5: Take screenshots for defects
         defects_with_image_path = []
@@ -752,7 +757,8 @@ class VideoProcessor:
                     defect_dict['image_path'] = None
                     defect_dict['image_filename'] = None
                     defects_with_image_path.append(defect_dict)
-
+        progress_callback(task_id, percent=90.0, message="generating PDF")        
+        
         # Step 7: Generate PDF report
         if defects_with_image_path:
             try:
@@ -826,7 +832,9 @@ def process_video_and_generate_report(
     video_url: str,
     presigned_s3_url: Optional[str] = None,
     upload_to_s3: bool = False,
-    openai_api_key: Optional[str] = None
+    openai_api_key: Optional[str] = None,
+    task_id: str = "1",
+    progress_callback:Callable[..., None] = None,
 ) -> str:
     """
     Simple function to process video and return report URL
@@ -849,13 +857,13 @@ def process_video_and_generate_report(
             whisper_model_name="small.en",
             openai_api_key=openai_api_key
         )
-        
+        progress_callback(task_id, status="running", percent=5.0, message="downloading video")
         # Process video and get defects
         video_source = {
             "type": video_source_type,
             "path": video_url  # For S3, this should be the public URL
         }
-        defects = processor.process_video(video_source)
+        defects = processor.process_video(video_source,progress_callback=progress_callback,task_id=task_id)
         
         # Get local PDF report path
         output_dir = "output"
@@ -900,15 +908,17 @@ def main():
         whisper_model_name="small.en",
         openai_api_key=api_key
     )
-    
+    from progress import progress_store
+    task_id = str(uuid.uuid4())
+    progress_store.init(task_id, message="queued")
     # Example usage with local video
     video_source = {
         "type": "local",
-        "path": "/Users/consultadd/Desktop/My project/consultadd_project/input/part000.mp4"
+        "path": "/Users/abhishek/Downloads/part000.mp4"
     }
     
     try:
-        defects = processor.process_video(video_source)
+        defects = processor.process_video(video_source,progress_callback=progress_store.update,task_id=task_id)
         
         # Print results
         print(f"\nExtracted {len(defects)} defects:")
