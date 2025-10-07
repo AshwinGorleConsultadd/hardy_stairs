@@ -1,0 +1,8 @@
+source_video
+input
+audio_folder
+.venv
+.env
+init.txt
+output
+__pycache__

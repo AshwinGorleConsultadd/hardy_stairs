@@ -4,7 +4,7 @@ Simple Entry Point for Video Processing Pipeline
 This file serves as a simple entry point that calls the main processing function.
 """
 
-from video_analyser_service import process_video_and_generate_report
+from video_analyser_service_2 import process_video_and_generate_report
 
 def main():
     """Simple entry point - just call the function and get report URL"""
@@ -12,7 +12,7 @@ def main():
     #Example 1: Local video without S3 upload
     report_url = process_video_and_generate_report(
         video_source_type="local",
-        video_url="input/part000.mp4",
+        video_url="input/poc4.mp4",
         upload_to_s3=False
     )
     print("✅ Report URL:", report_url)

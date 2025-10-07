@@ -124,10 +124,12 @@ def complete_upload(request: CompleteUploadRequest):
         "fileUrl": "s3://bucket-name/inspection_video.mp4"
     }
     """
+    sorted_parts = sorted(request.parts, key=lambda p: p["PartNumber"])
+
     file_url = complete_multipart_upload(
         request.fileName,
         request.uploadId,
-        request.parts
+        sorted_parts
     )
     return {"fileUrl": file_url}
 
@@ -225,4 +227,3 @@ def get_progress(task_id: str):
     if not data:
         raise HTTPException(status_code=404, detail="task_id not found")
     return data
-

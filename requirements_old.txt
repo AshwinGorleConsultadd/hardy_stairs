@@ -11,16 +11,14 @@ pandas>=2.0.0
 
 # Audio/Video processing
 openai-whisper>=20231117
-ffmpeg-python==0.2.0 
+ffmpeg-python>=0.2.0
 opencv-python>=4.8.0
 
-# GPU support for Whisper (install appropriate version for your CUDA)
-# For CUDA 11.8: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
-# For CUDA 12.1: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-torch
-torchaudio
-
 # AWS S3 support removed - using HTTP download instead
+
+# Additional utilities
+python-dotenv>=1.0.0
+pathlib2>=2.3.7
 
 # PDF generation
 reportlab>=4.0.0
@@ -29,8 +27,8 @@ reportlab>=4.0.0
 requests>=2.31.0
 
 # Development dependencies (optional)
-# jupyter>=1.0.0
-# matplotlib>=3.7.0
-# seaborn>=0.12.0
+jupyter>=1.0.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
 
 fuzzywuzzy

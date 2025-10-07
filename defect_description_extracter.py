@@ -34,20 +34,31 @@ def extract_defect_from_chunk(chunk: Dict[str, Any]) -> Optional[DefectInfo]:
     priority = None
     defect_description = None
     
+    # Build robust number-word alternation, preferring longer matches first and
+    # supporting both hyphenated and space-separated variants (e.g., "twenty-one"/"twenty one")
+    number_word_variants = []
+    for word in word_to_num.keys():
+        number_word_variants.append(word)
+        if '-' in word:
+            number_word_variants.append(word.replace('-', ' '))
+    # Sort by length descending so that longer words like "eighteen" match before "eight"
+    number_word_variants = sorted(set(number_word_variants), key=len, reverse=True)
+    number_word_re = "|".join(number_word_variants)
+    
     # Strategy 1: Extract tread number (numeric and alphabetic)
     tread_patterns = [
-        r'tread\s+(?:number\s+)?(\d+)',
-        r'track\s+(?:number\s+)?(\d+)',
-        r'try\s+(?:number\s+)?(\d+)',
-        r'tri\s+(?:number\s+)?(\d+)',
-        r'tred\s+(?:number\s+)?(\d+)',
-        r'thread\s+(?:number\s+)?(\d+)',
-        r'tread\s+(?:number\s+)?(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two|twenty-three|twenty-four|twenty-five)',
-        r'track\s+(?:number\s+)?(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two|twenty-three|twenty-four|twenty-five)',
-        r'try\s+(?:number\s+)?(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two|twenty-three|twenty-four|twenty-five)',
-        r'tri\s+(?:number\s+)?(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two|twenty-three|twenty-four|twenty-five)',
-        r'tred\s+(?:number\s+)?(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two|twenty-three|twenty-four|twenty-five)',
-        r'thread\s+(?:number\s+)?(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two|twenty-three|twenty-four|twenty-five)'
+        r'\b(?:tread)\s+(?:number\s+)?(\d+)\b',
+        r'\b(?:track)\s+(?:number\s+)?(\d+)\b',
+        r'\b(?:try)\s+(?:number\s+)?(\d+)\b',
+        r'\b(?:tri)\s+(?:number\s+)?(\d+)\b',
+        r'\b(?:tred)\s+(?:number\s+)?(\d+)\b',
+        r'\b(?:thread)\s+(?:number\s+)?(\d+)\b',
+        rf'\b(?:tread)\s+(?:number\s+)?({number_word_re})\b',
+        rf'\b(?:track)\s+(?:number\s+)?({number_word_re})\b',
+        rf'\b(?:try)\s+(?:number\s+)?({number_word_re})\b',
+        rf'\b(?:tri)\s+(?:number\s+)?({number_word_re})\b',
+        rf'\b(?:tred)\s+(?:number\s+)?({number_word_re})\b',
+        rf'\b(?:thread)\s+(?:number\s+)?({number_word_re})\b'
     ]
     
     for pattern in tread_patterns:
@@ -62,10 +73,10 @@ def extract_defect_from_chunk(chunk: Dict[str, Any]) -> Optional[DefectInfo]:
     
     # Strategy 2: Extract priority (numeric and alphabetic)
     priority_patterns = [
-        r'priority\s+(\d+)',
-        r'priority\s+(one|two|three|four|five|six)',
-        r'pri\s+(\d+)',
-        r'pri\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two|twenty-three|twenty-four|twenty-five)'
+        r'\bpriority\s+(\d+)\b',
+        rf'\bpriority\s+({number_word_re})\b',
+        r'\bpri\s+(\d+)\b',
+        rf'\bpri\s+({number_word_re})\b'
     ]
     
     for pattern in priority_patterns:
@@ -108,6 +119,18 @@ def extract_defect_description(description: str) -> Optional[str]:
     """Extract defect description from the text"""
     # Common defect patterns
     defect_patterns = [
+        # Combined with "and" cases
+        r'(top\s+rear\s+(?:and\s+)?front\s+crack)',
+        r'(top\s+front\s+(?:and\s+)?rear\s+crack)',
+        r'(bottom\s+rear\s+(?:and\s+)?front\s+crack)',
+        r'(bottom\s+front\s+(?:and\s+)?rear\s+crack)',
+        r'(front\s+(?:and\s+)?rear\s+crack)',
+        r'(rear\s+(?:and\s+)?front\s+crack)',
+        r'(top\s+(?:and\s+)?rear\s+crack)',
+        r'(top\s+(?:and\s+)?front\s+crack)',
+        r'(bottom\s+(?:and\s+)?rear\s+crack)',
+        r'(bottom\s+(?:and\s+)?front\s+crack)',
+        # Existing specific combos
         r'(top\s+(?:front\s+)?rear\s+crack)',
         r'(bottom\s+(?:front\s+)?rear\s+crack)',
         r'(top\s+(?:rear\s+)?front\s+crack)',
@@ -118,6 +141,7 @@ def extract_defect_description(description: str) -> Optional[str]:
         r'(bottom\s+rear\s+crack)',
         r'(top\s+front\s+crack)',
         r'(bottom\s+front\s+crack)',
+        # Single location fallbacks
         r'(rear\s+crack)',
         r'(front\s+crack)',
         r'(top\s+crack)',
@@ -138,6 +162,18 @@ def extract_defect_description_from_full_chunk(full_text: str) -> Optional[str]:
     """Extract defect description from the full chunk text"""
     # Look for crack-related terms
     crack_patterns = [
+        # Combined with "and" cases
+        r'(top\s+rear\s+(?:and\s+)?front\s+crack)',
+        r'(top\s+front\s+(?:and\s+)?rear\s+crack)',
+        r'(bottom\s+rear\s+(?:and\s+)?front\s+crack)',
+        r'(bottom\s+front\s+(?:and\s+)?rear\s+crack)',
+        r'(front\s+(?:and\s+)?rear\s+crack)',
+        r'(rear\s+(?:and\s+)?front\s+crack)',
+        r'(top\s+(?:and\s+)?rear\s+crack)',
+        r'(top\s+(?:and\s+)?front\s+crack)',
+        r'(bottom\s+(?:and\s+)?rear\s+crack)',
+        r'(bottom\s+(?:and\s+)?front\s+crack)',
+        # Existing specific combos
         r'(top\s+(?:front\s+)?rear\s+crack)',
         r'(bottom\s+(?:front\s+)?rear\s+crack)',
         r'(top\s+(?:rear\s+)?front\s+crack)',
@@ -148,6 +184,7 @@ def extract_defect_description_from_full_chunk(full_text: str) -> Optional[str]:
         r'(bottom\s+rear\s+crack)',
         r'(top\s+front\s+crack)',
         r'(bottom\s+front\s+crack)',
+        # Single location fallbacks
         r'(rear\s+crack)',
         r'(front\s+crack)',
         r'(top\s+crack)',

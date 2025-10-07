@@ -1,5 +1,8 @@
 from config import s3_client, S3_BUCKET
+import botocore
+import logging
 
+logger = logging.getLogger(__name__)
 def initiate_multipart_upload(file_name: str, content_type: str) -> str:
     """
     Initiates multipart upload in S3 and returns uploadId
@@ -37,18 +40,28 @@ def generate_presigned_upload_url(file_name: str) -> str:
         ExpiresIn=3600,
     )
 
-def complete_multipart_upload(file_name: str, upload_id: str, parts: list[dict]) -> str:
+def complete_multipart_upload(file_name: str, upload_id: str, parts: list[dict], retries: int = 3) -> str:
     """
-    Completes multipart upload and returns file URL
+    Completes multipart upload and returns file URL.
+    Adds retry logic and ensures parts are sorted correctly.
     """
-    response = s3_client.complete_multipart_upload(
-        Bucket=S3_BUCKET,
-        Key=file_name,
-        UploadId=upload_id,
-        MultipartUpload={"Parts": parts},
-    )
-    return response["Location"]
+    # ✅ S3 requires parts to be sorted by PartNumber
+    parts = sorted(parts, key=lambda p: p["PartNumber"])
 
+    for attempt in range(1, retries + 1):
+        try:
+            response = s3_client.complete_multipart_upload(
+                Bucket=S3_BUCKET,
+                Key=file_name,
+                UploadId=upload_id,
+                MultipartUpload={"Parts": parts},
+            )
+            return response["Location"]
+
+        except botocore.exceptions.ClientError as e:
+            logger.warning(f"Attempt {attempt}/{retries} to complete upload failed: {e}")
+            if attempt == retries:
+                raise
 
 def generate_download_url(filename: str, expires_in: int = 3600) -> str:
     """
