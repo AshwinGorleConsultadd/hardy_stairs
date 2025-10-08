@@ -80,12 +80,6 @@ CRITICAL RULES:
 6. If a description has no thread defects, keep it as-is
 7. Maintain the order of defects as much as possible
 
-CONTEXT PRESERVATION (VERY IMPORTANT):
-- Always preserve and carry through building_number and apartment_number when present on input objects.
-- When splitting a single input into multiple outputs, copy the same building_number and apartment_number to each output object.
-- When merging across consecutive inputs, use the earliest non-null building_number and apartment_number among the merged inputs.
-- Never drop apartment_number or building_number if they exist in any of the related input objects.
-
 SCATTERED THREAD INFORMATION HANDLING:
 - Look for thread information that is split across multiple consecutive objects
 - Merge incomplete thread information into complete thread defects
@@ -114,6 +108,8 @@ Examples:
 CRITICAL: Look for thread information scattered across consecutive objects and merge them into complete thread defects.
 Pay special attention to cases where tread number, priority, and defect type are in separate consecutive objects.
 
+CONTEXT PRESERVATION (VERY IMPORTANT):
+- keep building_number and apartment_number field and it's value as it is without changing them in resultant objects.
 Process ALL defects in the array:
 
 {json.dumps(batch, indent=2)}"""
