@@ -34,3 +34,4 @@ requests>=2.31.0
 # seaborn>=0.12.0
 
 fuzzywuzzy
+uuid

@@ -32,6 +32,8 @@ tools = [
                                 "description": {"type": "string"},
                                 "start_time": {"type": "number"},
                                 "end_time": {"type": "number"},
+                                "building_number": {"type": ["string", "null"]},
+                                "apartment_number": {"type": ["string", "null"]}
                             },
                             "required": ["description", "start_time", "end_time"]
                         }
@@ -77,6 +79,12 @@ CRITICAL RULES:
 5. Preserve all thread numbers, priorities, locations, and defect types
 6. If a description has no thread defects, keep it as-is
 7. Maintain the order of defects as much as possible
+
+CONTEXT PRESERVATION (VERY IMPORTANT):
+- Always preserve and carry through building_number and apartment_number when present on input objects.
+- When splitting a single input into multiple outputs, copy the same building_number and apartment_number to each output object.
+- When merging across consecutive inputs, use the earliest non-null building_number and apartment_number among the merged inputs.
+- Never drop apartment_number or building_number if they exist in any of the related input objects.
 
 SCATTERED THREAD INFORMATION HANDLING:
 - Look for thread information that is split across multiple consecutive objects

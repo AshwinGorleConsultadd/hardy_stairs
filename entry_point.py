@@ -4,16 +4,24 @@ Simple Entry Point for Video Processing Pipeline
 This file serves as a simple entry point that calls the main processing function.
 """
 
-from video_analyser_service_2 import process_video_and_generate_report
+from video_analyser_service import process_video_and_generate_report
+from progress import progress_store
+import uuid
 
 def main():
     """Simple entry point - just call the function and get report URL"""
+    task_id = str(uuid.uuid4())
+
+    # Initialize progress (visible immediately to clients)
+    progress_store.init(task_id, message="queued")
     
     #Example 1: Local video without S3 upload
     report_url = process_video_and_generate_report(
         video_source_type="local",
         video_url="input/poc4.mp4",
-        upload_to_s3=False
+        upload_to_s3=False,
+        task_id=task_id,                        # <-- pass through
+        progress_callback=progress_store.update 
     )
     print("✅ Report URL:", report_url)
     

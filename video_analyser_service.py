@@ -10,9 +10,7 @@ import json
 import logging
 import re
 from typing import Callable, List, Optional, Dict, Any
-import uuid
 from config import AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_REGION
-from langchain_core.language_models import llms
 from transcript_refiner import refine_transcript_chunks_symmentically
 from defect_description_extracter import extract_defect_from_chunk, calculate_screenshot_timestamp
 from models import DefectInfo
@@ -23,26 +21,9 @@ import boto3
 import whisper
 import ffmpeg
 from urllib.parse import urlparse
-# LLM and structured output imports
-try:
-    from langchain_community.llms import OpenAI
-    from langchain_community.prompts import PromptTemplate
-    from langchain_community.output_parsers import PydanticOutputParser
-except ImportError:
-    try:
-        from langchain.llms import OpenAI
-        from langchain.prompts import PromptTemplate
-        from langchain.output_parsers import PydanticOutputParser
-    except ImportError:
-        print("⚠️ LangChain not available. LLM features will be disabled.")
-        OpenAI = None
-        PromptTemplate = None
-        PydanticOutputParser = None
-from pydantic import BaseModel, Field
+from pdf_generator import generate_pdf_report
 
-# AWS imports removed - using HTTP download for S3 instead
-
-
+# AWS imports removed - using HTTP download for S3 instea
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -51,17 +32,15 @@ logger = logging.getLogger(__name__)
 class VideoProcessor:
     """Main class for processing repair videos and extracting defect information"""
     
-    def __init__(self, whisper_model_name: str = "small.en", openai_api_key: Optional[str] = None):
+    def __init__(self, whisper_model_name: str = "medium.en"):
         """
         Initialize the video processor
         
         Args:
             whisper_model_name: Whisper model to use for transcription
-            openai_api_key: OpenAI API key for LLM processing
         """
         self.whisper_model_name = whisper_model_name
         self.whisper_model = None
-        self.llm = None
         self.s3_client = None
         
         # Building tracking
@@ -69,30 +48,29 @@ class VideoProcessor:
         self.current_building_name = None
         self.current_apartment_number = None
         
-        # Initialize OpenAI LLM if API key provided
-        if openai_api_key:
-            try:
-                os.environ["OPENAI_API_KEY"] = openai_api_key
-                self.llm = OpenAI()
-                logger.info("✅ LLM initialized successfully")
-                print("✅ LLM connected successfully!")
-            except Exception as e:
-                logger.error("Failed to initialize LLM: %s", e)
-                self.llm = None
-        else:
-            self.llm = None
-        
         # S3 client not needed - we'll use HTTP download for public URLs
         self.s3_client = None
     
     def load_whisper_model(self):
         """Load the Whisper model for transcription"""
         try:
-            logger.info("Loading Whisper model: %s", self.whisper_model_name)
-            self.whisper_model = whisper.load_model(self.whisper_model_name)
-            logger.info("Whisper model loaded successfully")
+            logger.info("🎤 Loading Whisper model: %s", self.whisper_model_name)
+            
+            # Check if CUDA is available
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            logger.info("🖥️  Using device: %s", device)
+            
+            # Load model with device specification
+            self.whisper_model = whisper.load_model(self.whisper_model_name, device=device)
+            logger.info("✅ Whisper model '%s' loaded successfully on %s", self.whisper_model_name, device)
+            
+            # Log GPU memory usage if available
+            if device == "cuda":
+                memory_used = torch.cuda.memory_allocated() / 1024**3
+                logger.info("💾 GPU Memory used: %.2f GB", memory_used)
         except Exception as e:
-            logger.error("Failed to load Whisper model: %s", e)
+            logger.error("❌ Failed to load Whisper model '%s': %s", self.whisper_model_name, e)
             raise
     
     def get_video_from_local(self, video_path: str) -> str:
@@ -156,7 +134,7 @@ class VideoProcessor:
     
     def extract_audio_from_video(self, video_path: str, output_audio_path: str) -> str:
         """
-        Extract audio from video using FFmpeg
+        Extract audio from video using FFmpeg with enhanced preprocessing
         
         Args:
             video_path: Path to the input video
@@ -167,23 +145,29 @@ class VideoProcessor:
         """
         try:
             
-            logger.info("Extracting audio from video: %s", video_path)
+            logger.info("🎬 Extracting audio from video: %s", video_path)
             
-            # Use ffmpeg to extract audio
+            # Enhanced audio extraction with preprocessing for better Whisper performance
             (
                 ffmpeg
                 .input(video_path)
-                .output(output_audio_path, acodec='pcm_s16le', ac=1, ar='16000')
+                .output(
+                    output_audio_path, 
+                    acodec='pcm_s16le',  # 16-bit PCM
+                    ac=1,  # Mono channel
+                    ar='16000',  # 16kHz sample rate
+                    af='highpass=f=80,lowpass=f=8000,volume=1.2'  # Audio filters for better quality
+                )
                 .overwrite_output()
                 .run(quiet=True)
             )
             
-            logger.info("Audio extracted to: %s", output_audio_path)
+            logger.info("✅ Audio extracted and preprocessed to: %s", output_audio_path)
             return output_audio_path
             
-        except Exception as e:
-            logger.error("FFmpeg error: %s", e)
-            raise
+        # except ffmpeg.Error as e:
+        #     logger.error("FFmpeg error: %s", e)
+        #     raise
         except Exception as e:
             logger.error("Failed to extract audio: %s", e)
             raise
@@ -202,80 +186,36 @@ class VideoProcessor:
             self.load_whisper_model()
         
         try:
-            logger.info("Transcribing audio: %s", audio_path)
-            result = self.whisper_model.transcribe(audio_path, word_timestamps=True, language="en", condition_on_previous_text=False, no_speech_threshold=0.5 )
-            logger.info("Transcription completed successfully")
+            logger.info("🎵 Starting transcription of audio: %s", audio_path)
+            logger.info("🤖 Using Whisper model: %s", self.whisper_model_name)
+            
+            # Optimized parameters for better accuracy
+            result = self.whisper_model.transcribe(
+                audio_path, 
+                word_timestamps=True, 
+                language="en", 
+                condition_on_previous_text=True,  # Better context awareness
+                no_speech_threshold=0.3,  # Lower threshold to catch more speech
+                logprob_threshold=-0.8,  # Lower threshold for better detection
+                compression_ratio_threshold=2.4,  # Better compression handling
+                temperature=0.0,  # Deterministic output
+                best_of=1,  # Use best result
+                beam_size=5,  # Required for patience parameter
+                patience=1.0,  # More patience for difficult audio
+                length_penalty=1.0,  # Balanced length penalty
+                suppress_tokens=[-1],  # Suppress silence tokens
+                initial_prompt="This is a building inspection video with technical terms about stairs, treads, defects, and construction details."  # Context prompt
+            )
+            
+            logger.info("✅ Transcription completed successfully using model: %s", self.whisper_model_name)
             return result
         except Exception as e:
-            logger.error("Failed to transcribe audio: %s", e)
+            logger.error("❌ Failed to transcribe audio with model '%s': %s", self.whisper_model_name, e)
             raise
-    
-    def _extract_building_info(self, text: str) -> Optional[Dict[str, str]]:
-        """Extract building information from text"""
-        
-        # Patterns for building numbers (including department)
-        number_patterns = [
-            r'building\s+(\d+)',
-            r'building\s+number\s+(\d+)',
-            r'department\s+(\d+)',
-            r'department\s+(\d+)\s+building\s+(\d+)'  # "department 137 building one"
-        ]
-        
-        # Patterns for building names
-        name_patterns = [
-            r'building\s+([a-zA-Z][a-zA-Z0-9\s]*)',
-            r'building\s+name\s+([a-zA-Z][a-zA-Z0-9\s]*)'
-        ]
-        
-        building_info = {}
-        
-        # Check for building numbers (including department)
-        for pattern in number_patterns:
-            match = re.search(pattern, text)
-            if match:
-                if 'department' in pattern and 'building' in pattern:
-                    # Handle "department 137 building one" case
-                    building_info['number'] = match.group(2)  # building number
-                else:
-                    building_info['number'] = match.group(1)
-                break
-        
-        # Check for building names (only if no number found)
-        if 'number' not in building_info:
-            for pattern in name_patterns:
-                match = re.search(pattern, text)
-                if match:
-                    name = match.group(1).strip()
-                    # Only consider it a name if it's not just a number
-                    if not name.isdigit():
-                        building_info['name'] = name
-                        break
-        
-        return building_info if building_info else None
-    
-    def _extract_apartment_number(self, text: str) -> Optional[str]:
-        """Extract apartment number from text"""
-        patterns = [
-            r'apartment\s+(\d+)',
-            r'apartment\s+number\s+(\d+)',
-            r'department\s+(\d+)'  # Handle misspellings
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
-                return match.group(1)
-        return None
-    
-    def _enrich_defects_with_timestamps(self, defects: List[DefectInfo], transcript_result: Dict[str, Any]):
-        """Enrich defects with more accurate timestamp information"""
-        # This method can be enhanced to provide more precise timestamps
-        # based on word-level timestamps from Whisper
-        # TODO: Implement word-level timestamp matching
 
-    def create_formated_transcript_chunks(self, transcript_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def extranct_required_details_from_transcript_chunks(self, transcript_result: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Create refined transcript chunks using simple chunking
+        Create refined transcript chunks while removing extra things from transcript object and keeping only required thinds mentioned in chunks.append
         
         Args:
             transcript_result: Whisper transcription result
@@ -291,23 +231,25 @@ class VideoProcessor:
             text = segment.get('text', '').strip()
             
             if text:
+                # Detect building/apartment early and store in chunk for downstream preservation
+                detected_building, detected_apartment = self._extract_building_apartment_from_chunk(text)
                 chunks.append({
                     "description": text,
                     "start_time": start_time,
                     "end_time": end_time,
-                    "building_number": None,
-                    "apartment_number": None
+                    "building_number": detected_building,
+                    "apartment_number": detected_apartment
                 })
         
         logger.info("Created %d simple transcript chunks", len(chunks))
         return chunks
     
-
-    #-------------------------------------------------------------------------------
     def extract_defects_using_regs(self, refined_chunks: List[Dict[str, Any]]) -> List[DefectInfo]:
-        """Rule-based defect extraction with sequential building/apartment tracking"""
+        """
+        It takes refined transcript chunks and extract defects using rules and also detect building and apartment numbers and assign them to each defect.
+        Rule-based defect extraction with sequential building/apartment tracking
+        """
         defects = []
-        
         # Initialize tracking variables
         last_building_number = None
         last_apartment_number = None
@@ -340,8 +282,13 @@ class VideoProcessor:
             logger.info("📝 Processing chunk %d/%d: %s", i+1, len(refined_chunks), description[:100])
             logger.debug("🔍 Chunk data: %s", chunk)
             
-            # Update building and apartment numbers if found in this chunk
-            building_num, apartment_num = self._extract_building_apartment_from_chunk(description)
+            # Prefer numbers provided by upstream (LLM-refined or initial chunk); fallback to in-place extraction ################################
+            provided_building = chunk.get("building_number") if isinstance(chunk, dict) else None
+            provided_apartment = chunk.get("apartment_number") if isinstance(chunk, dict) else None
+            if provided_building or provided_apartment:
+                building_num, apartment_num = provided_building, provided_apartment
+            else:
+                building_num, apartment_num = self._extract_building_apartment_from_chunk(description)
             
             if building_num:
                 building_counter += 1
@@ -518,108 +465,6 @@ class VideoProcessor:
         
         return defects
     
-    
-    def _create_defect_extraction_prompt(self) -> PromptTemplate:
-        """Create the prompt template for defect extraction"""
-        template = """
-        You are an expert at extracting structured defect information from building inspection transcript chunks.
-        
-        Given the following transcript chunks, extract defect information with exact timestamps.
-        
-        EXTRACTION RULES:
-        1. Only extract chunks that contain defect information (tread numbers, priorities, cracks, etc.)
-        2. Use EXACT timestamps as provided in the input
-        3. Extract tread numbers (may be written as "tread 9", "tread number 9", "track 9", "try 9", etc.)
-        4. Extract priorities (may be "priority 1", "priority one", "priority 2", "priority two", etc.)
-        5. DEFECT DESCRIPTION EXTRACTION - THIS IS THE MOST IMPORTANT PART:
-           - Look for defect descriptions like "top rear crack", "bottom front crack", "top center crack", etc.
-           - The description should be clean and concise (e.g., "top rear crack" not "priority one top rear crack")
-           - Extract ONLY the defect description, not the entire sentence
-           - Common patterns: "top rear crack", "bottom front crack", "top center crack", "bottom rear crack", "front crack", "rear crack"
-           - If you see "top front rear crack" or similar, extract as "top front rear crack"
-           - CRITICAL: If the entire chunk is about a defect (like "tread number eight priority one top rear crack"), 
-             extract the defect description part ("top rear crack") and ignore the tread/priority information
-           - NEVER leave description as null if there's a crack/defect mentioned in the chunk
-        6. Handle misspellings intelligently (thread -> tread, tred -> tread, etc.)
-        7. ALWAYS extract the defect description - it should contain the location (top/bottom/front/rear) and type (crack/defect)
-        
-        TIMESTAMP REQUIREMENTS:
-        - Use EXACT start_time and end_time from input chunks
-        - Do not modify or estimate timestamps
-        - timestamp_start and timestamp_end should match the input exactly
-        
-        PRIORITY EXTRACTION:
-        - Convert word priorities to numbers: "one" -> "1", "two" -> "2", "three" -> "3"
-        - Keep numeric priorities as strings: "1", "2", "3"
-        
-        EXAMPLES:
-        
-        Input:
-        [552.96s - 561.88s] Track number 9 priority 2 top rear crack.
-        
-        Output:
-        {{
-            "tread_number": "9",
-            "priority": "2", 
-            "description": "top rear crack",
-            "timestamp_start": 552.96,
-            "timestamp_end": 561.88,
-            "transcript_segment": "Track number 9 priority 2 top rear crack."
-        }}
-        
-        Input:
-        [24.54s - 37.30s] Track, tread number 10, priority one, top rear crack, screenshot.
-        
-        Output:
-        {{
-            "tread_number": "10",
-            "priority": "1",
-            "description": "top rear crack",
-            "timestamp_start": 24.54,
-            "timestamp_end": 37.30,
-            "transcript_segment": "Track, tread number 10, priority one, top rear crack, screenshot."
-        }}
-        
-        IMPORTANT: If you see a defect mentioned but cannot extract a clean description, 
-        still include the defect but try to extract the best possible description from the context.
-        
-        Input:
-        [265.12s - 277.52s] tread number eight priority one top rear crack
-        
-        Output:
-        {{
-            "tread_number": "8",
-            "priority": "1",
-            "description": "top rear crack",
-            "timestamp_start": 265.12,
-            "timestamp_end": 277.52,
-            "transcript_segment": "tread number eight priority one top rear crack"
-        }}
-        
-        Input:
-        [1021.78s - 1025.46s] fourteen priority to top center cracks
-        
-        Output:
-        {{
-            "tread_number": "14",
-            "priority": null,
-            "description": "top center cracks", 
-            "timestamp_start": 1021.78,
-            "timestamp_end": 1025.46,
-            "transcript_segment": "fourteen priority to top center cracks"
-        }}
-        
-        Transcript chunks:
-        {transcript_chunks}
-        
-        Please provide the extracted defects in JSON format as an array of objects with the required fields.
-        """
-        
-        return PromptTemplate(
-            template=template,
-            input_variables=["transcript_chunks"]
-        )
-    
     def process_video(self, video_source: Dict[str, str], progress_callback: Callable[..., None],task_id,output_dir: str = "output") -> List[DefectInfo]:
         """
         Main method to process a video and extract defect information
@@ -638,6 +483,7 @@ class VideoProcessor:
         os.makedirs(output_dir, exist_ok=True)
         
         # Step 1: Get video
+        progress_callback(task_id, percent=10.0, message="Loading video to process...")
         if video_source["type"] == "local":
             video_path = self.get_video_from_local(video_source["path"])
         elif video_source["type"] == "s3":
@@ -648,33 +494,35 @@ class VideoProcessor:
             )
         else:
             raise ValueError("Invalid video source type. Use 'local' or 's3'")
-        progress_callback(task_id, percent=10.0, message="transcribing")
+        
         # Step 2: Extract audio
+        progress_callback(task_id, percent=20.0, message="Extracting audio from video...")
         audio_path = os.path.join(output_dir, "extracted_audio.wav")
         self.extract_audio_from_video(video_path, audio_path)
         
         # Step 3: Transcribe audio
+        progress_callback(task_id, percent=30.0, message="Transcribing audio...")
         transcript_result = self.transcribe_audio(audio_path)
-        progress_callback(task_id, percent=20.0, message="transcribe complete")
+        
         # Save transcript for debugging
         transcript_file = os.path.join(output_dir, "1_transcript.json")
         with open(transcript_file, 'w', encoding='utf-8') as f:
             json.dump(transcript_result, f, indent=2)
         
-        progress_callback(task_id, percent=50.0, message="creating chunks")        
+        
         # Step 4: Create refined transcript chunks
-        formated_transcript_chunks = self.create_formated_transcript_chunks(transcript_result)
-        progress_callback(task_id, percent=55.0, message="refining chunks")        
+        progress_callback(task_id, percent=60.0, message="Clening Transcript Chunks...")
+        formated_transcript_chunks = self.extranct_required_details_from_transcript_chunks(transcript_result)
         
         # Save refined transcript chunks
         refined_chunks_file = os.path.join(output_dir, "2_formated_transcript_chunks.json")
         with open(refined_chunks_file, 'w', encoding='utf-8') as f:
             json.dump(formated_transcript_chunks, f, indent=2)
 
-        # Step 4.6: Semantic processing of formated chunks with retry logic
+        # Step 5: Semantic processing of formated chunks with retry logic
+        progress_callback(task_id, percent=65.0, message="Refining to identify defects...")
         llms_refined_transcript_cunks = None
         max_retries = 3
-        progress_callback(task_id, percent=60.0, message="starting  LLM processing")        
         
         for attempt in range(max_retries):
             try:
@@ -708,10 +556,10 @@ class VideoProcessor:
             logger.warning("⚠️🔴🔴🔴🔴🔴 LLM processing failed after %d attempts. Using original formated chunks as fallback.", max_retries)
             llms_refined_transcript_cunks = formated_transcript_chunks
         
-        # Step 5: Extract defects using refined chunks
+        # Step 6: Extract defects using refined chunks
+        progress_callback(task_id, percent=85.0, message="Extracting defects...")
         defects = self.extract_defects_using_regs(llms_refined_transcript_cunks)
 
-        progress_callback(task_id, percent=70.0, message="Extracting Defects")        
         
         # Save defects for debugging
         defects_file = os.path.join(output_dir, "4_extracted_defects.json")
@@ -721,9 +569,9 @@ class VideoProcessor:
         logger.info("Processing completed. Found %d defects.", len(defects))
         
         # Print all defects to terminal
-        print("\n" + "="*80)
-        print("📋 EXTRACTED DEFECTS SUMMARY")
-        print("="*80)
+        # print("\n" + "="*80)
+        # print("📋 EXTRACTED DEFECTS SUMMARY")
+        # print("="*80)
         # for i, defect in enumerate(defects, 1):
         #     print(f"\n🔍 Defect #{i}:")
         #     print(f"  Building: {defect.building_counter} ({defect.building_name})")
@@ -740,9 +588,9 @@ class VideoProcessor:
         print("="*80)
         print(f"🔵Total defects found: {len(defects)}")
         print("="*80 + "\n")
-        progress_callback(task_id, percent=80.0, message="Extracting ScreenShots")        
         
-        # Step 6.5: Take screenshots for defects
+        # Step 7: Take screenshots for defects
+        progress_callback(task_id, percent=80.0, message="Taking screenshots for defects...")
         defects_with_image_path = []
         if defects:
             try:
@@ -757,12 +605,11 @@ class VideoProcessor:
                     defect_dict['image_path'] = None
                     defect_dict['image_filename'] = None
                     defects_with_image_path.append(defect_dict)
-        progress_callback(task_id, percent=90.0, message="generating PDF")        
-        
-        # Step 7: Generate PDF report
+
+        # Step 8: Generate PDF report
+        progress_callback(task_id, percent=90.0, message="Generating PDF report...")
         if defects_with_image_path:
             try:
-                from pdf_generator import generate_pdf_report
                 pdf_output_path = os.path.join(output_dir, "defects_report.pdf")
                 pdf_success = generate_pdf_report(defects_with_image_path, pdf_output_path)
                 if pdf_success:
@@ -832,7 +679,6 @@ def process_video_and_generate_report(
     video_url: str,
     presigned_s3_url: Optional[str] = None,
     upload_to_s3: bool = False,
-    openai_api_key: Optional[str] = None,
     task_id: str = "1",
     progress_callback:Callable[..., None] = None,
 ) -> str:
@@ -854,17 +700,15 @@ def process_video_and_generate_report(
         
         # Initialize video processor
         processor = VideoProcessor(
-            whisper_model_name="small.en",
-            openai_api_key=openai_api_key
+            whisper_model_name="base.en"
         )
-        progress_callback(task_id, status="running", percent=5.0, message="downloading video")
+        
         # Process video and get defects
         video_source = {
             "type": video_source_type,
             "path": video_url  # For S3, this should be the public URL
         }
-        defects = processor.process_video(video_source,progress_callback=progress_callback,task_id=task_id)
-        
+        defects = processor.process_video(video_source, progress_callback, task_id)
         # Get local PDF report path
         output_dir = "output"
         local_pdf_path = os.path.join(output_dir, "defects_report.pdf")
@@ -890,58 +734,3 @@ def process_video_and_generate_report(
         logger.error("❌ Video processing failed: %s", e)
         return f"Error: {str(e)}"
 
-
-def main():
-    """Main function to demonstrate usage"""
-    # Initialize processor
-    api_key = os.getenv("OPENAI_API_KEY")
-    print("API Key: ", api_key)
-    
-    if not api_key:
-        print("⚠️  WARNING: OPENAI_API_KEY not set!")
-        print("   The system will use simple chunking instead of LLM processing.")
-        print("   For better results, set your OpenAI API key:")
-        print("   export OPENAI_API_KEY='your-api-key-here'")
-        print()
-    
-    processor = VideoProcessor(
-        whisper_model_name="small.en",
-        openai_api_key=api_key
-    )
-    from progress import progress_store
-    task_id = str(uuid.uuid4())
-    progress_store.init(task_id, message="queued")
-    # Example usage with local video
-    video_source = {
-        "type": "local",
-        "path": "/Users/abhishek/Downloads/part000.mp4"
-    }
-    
-    try:
-        defects = processor.process_video(video_source,progress_callback=progress_store.update,task_id=task_id)
-        
-        # Print results
-        print(f"\nExtracted {len(defects)} defects:")
-        for i, defect in enumerate(defects, 1):
-            print(f"\nDefect {i}:")
-            print(f"  Building Counter: {defect.building_counter}")
-            print(f"  Building Name: {defect.building_name}")
-            print(f"  Apartment: {defect.apartment_number}")
-            print(f"  Tread: {defect.tread_number}")
-            print(f"  Priority: {defect.priority}")
-            print(f"  Description: {defect.description}")
-            timestamp_start = f"{defect.timestamp_start:.2f}" if defect.timestamp_start is not None else "None"
-            timestamp_end = f"{defect.timestamp_end:.2f}" if defect.timestamp_end is not None else "None"
-            ss_timestamp = f"{defect.ss_timestamp:.2f}" if defect.ss_timestamp is not None else "None"
-            
-            print(f"  Timestamp: {timestamp_start}s - {timestamp_end}s")
-            print(f"  Screenshot Time: {ss_timestamp}s")
-            print(f"  Transcript: {defect.transcript_segment}")
-            
-    except Exception as e:
-        logger.error("Processing failed: %s", e)
-        raise
-
-
-if __name__ == "__main__":
-    main()
